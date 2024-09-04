@@ -1,0 +1,10 @@
+telegram:
+  bot_token: <replace-by-your-token>
+  user_ids: [<comma-separated-telegram-permited-user-ids>]
+cameras:
+  - name: <replace-by-your-camera-name>
+    ip: <replace-by-your-camera-ip-with-port>
+    username: <replace-by-your-camera-username>
+    password: <replace-by-your-camera-password>
+    snapshot_uri: <replace-by-your-camera-snapshot-uri>
+polling_seconds: 5
