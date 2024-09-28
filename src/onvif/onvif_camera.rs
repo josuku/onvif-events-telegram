@@ -7,22 +7,21 @@ use schema::{
 };
 use url::Url;
 
-pub struct OnvifCameraClient {
-    pub camera_name: String,
-    ip: String,
-    snapshot_uri: String,
-    credentials: Credentials,
+#[derive(Clone)]
+pub struct OnvifCamera {
+    pub ip: String,
+    pub snapshot_uri: String,
+    pub credentials: Credentials,
     pull_client: Option<SoapClient>,
 }
 
-impl OnvifCameraClient {
+impl OnvifCamera {
     pub fn new(camera_config: CameraConfig) -> Self {
         let credentials: Credentials = Credentials {
             username: camera_config.username,
             password: camera_config.password,
         };
         Self {
-            camera_name: camera_config.name,
             ip: camera_config.ip,
             snapshot_uri: camera_config.snapshot_uri,
             credentials,
