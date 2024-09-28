@@ -1,89 +1,114 @@
 mod config;
-mod onvif_camera_client;
-mod telegram_client;
+mod network;
+mod onvif;
+mod repository;
+mod telegram;
+mod utils;
 
 use config::AppConfig;
 use log::{error, info};
-use onvif_camera_client::{is_new_detection, OnvifCameraClient};
-use telegram_client::TelegramClient;
+use onvif::onvif_camera::{download_picture, is_new_detection};
+use repository::db_store::DbStore;
+use repository::memory_repository::MemoryRepository;
+use std::{process::exit, sync::Arc};
+use telegram::telegram_bot::TelegramBot;
 use tokio::{select, signal};
+use utils::make_caption;
+
+const DEFAULT_POLLING_SECONDS: u64 = 1;
+const DEFAULT_BETWEEN_SECONDS: u64 = 15;
+
+type CameraId = i64;
+type SubscriptionId = i64;
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        error!("onvif events telegram: use CONFIG_FILE");
-        return;
-    }
+    let config = read_config();
 
-    let config_content = std::fs::read_to_string(&args[1]).expect("Could not read config");
-    let config: AppConfig = serde_yaml::from_str(&config_content).expect("Config file parsed");
+    let repo_store = Arc::new(DbStore::new());
+    repo_store.create_tables();
+    let repository = Arc::new(MemoryRepository::new(
+        DEFAULT_POLLING_SECONDS,
+        DEFAULT_BETWEEN_SECONDS,
+        repo_store,
+    ));
+    repository
+        .load_from_store()
+        .await
+        .expect("cannot load from store");
 
-    let mut telegram_clients: Vec<TelegramClient> = Vec::new();
-    config.telegram.user_ids.iter().for_each(|user_id| {
-        telegram_clients.push(TelegramClient::new(
-            config.telegram.bot_token.clone(),
-            user_id.clone(),
-        ));
-    });
-
-    let mut cameras: Vec<OnvifCameraClient> = Vec::new();
-    for camera_config in config.cameras.iter() {
-        let mut camera = OnvifCameraClient::new(camera_config.clone());
-        camera.init().await;
-        cameras.push(camera);
-    }
+    let telegram_bot = Arc::new(TelegramBot::new(
+        config.telegram.bot_token.clone(),
+        config.telegram.user_ids.clone(),
+        repository.clone(),
+    ));
 
     select! {
-        _ = start(config, telegram_clients, cameras) => (),
+        _ = start_bot(telegram_bot.clone()) => (),
+        _ = start_polling(telegram_bot, repository) => (),
         _ = signal::ctrl_c() => info!("Closing app"),
     }
 }
 
-async fn start(
-    config: AppConfig,
-    telegram_clients: Vec<TelegramClient>,
-    cameras: Vec<OnvifCameraClient>,
-) {
-    // Main Loop
+fn read_config() -> AppConfig {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 2 {
+        error!("onvif events telegram: use CONFIG_FILE");
+        exit(1);
+    }
+    let config_content = std::fs::read_to_string(&args[1]).expect("Could not read config");
+    serde_yaml::from_str(&config_content).expect("Config file parsed")
+}
+
+async fn start_bot(telegram_bot: Arc<TelegramBot>) {
+    telegram_bot.start().await;
+}
+
+async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
     loop {
-        for camera in &cameras {
-            let msg = match camera.get_pull_message().await {
+        for mut camera in repository.get_cameras().await {
+            let msg = match camera.client.get_event_message().await {
                 Ok(msg) => msg,
-                Err(_) => continue,
+                Err(err) => {
+                    error!("error getting pull message: {}", err);
+                    continue;
+                }
             };
 
             if is_new_detection(&msg) {
-                let snapshot = match camera.get_snapshot().await {
-                    Ok(snapshot) => snapshot,
-                    Err(_) => continue,
-                };
-
-                let time = msg.current_time;
-                let duration = (msg.termination_time.value.timestamp_millis()
-                    - time.value.clone().timestamp_millis())
-                    / 1000;
-
-                for telegram_client in &telegram_clients {
-                    telegram_client
-                        .send_message_with_picture(
-                            &time,
-                            duration,
-                            camera.camera_name.clone(),
+                if let Some(snapshot_uri) = &camera.snapshot_uri {
+                    let snapshot = match download_picture(snapshot_uri).await {
+                        Ok(snapshot) => snapshot,
+                        Err(err) => {
+                            error!("error getting snapshot: {}", err);
+                            continue;
+                        }
+                    };
+                    telegram_bot
+                        .send_notification(
+                            make_caption(
+                                "New Detection",
+                                &camera.name,
+                                &msg.current_time.value.to_utc(),
+                            ),
                             snapshot.clone(),
+                            camera.subscriptors.clone(),
+                            camera.id,
                         )
                         .await;
                 }
-
                 println!(
-                    "{} - new detection in camera:{} duration:{}",
-                    time, camera.camera_name, duration
+                    "{} - new detection in camera:{}",
+                    msg.current_time, camera.name
                 );
             }
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(config.polling_seconds)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            repository.get_polling_seconds().await,
+        ))
+        .await;
     }
 }
