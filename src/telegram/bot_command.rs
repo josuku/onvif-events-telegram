@@ -34,6 +34,8 @@ pub enum BotCommand {
     SetBetweenTime(u64),
     #[command(description = "fix snapshot uri camera id. params: camera_id")]
     FixSnapshot(CameraId),
+    #[command(description = "enable/disable daily report. params: true/false")]
+    DailyReport(bool),
 }
 
 pub async fn command_handler(
@@ -70,6 +72,9 @@ pub async fn command_handler(
         }
         BotCommand::FixSnapshot(camera_id) => {
             fix_snapshot_uri_cmd(bot, msg.chat.id, repository, camera_id).await?
+        }
+        BotCommand::DailyReport(bool) => {
+            enable_daily_report_cmd(bot, msg.chat.id, repository, bool).await?
         }
     };
     Ok(())
@@ -300,6 +305,28 @@ async fn fix_snapshot_uri_cmd(
         return ResponseResult::Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
             error,
         )));
+    }
+    Ok(())
+}
+
+async fn enable_daily_report_cmd(
+    bot: Bot,
+    chat_id: ChatId,
+    repository: Arc<MemoryRepository>,
+    enable: bool,
+) -> ResponseResult<()> {
+    if enable {
+        let _ = bot
+            .send_message(chat_id, "Subscribed to daily report".to_string())
+            .await;
+        repository.subscribe_to_daily_report(chat_id, true).await;
+    } else {
+        let _ = bot
+            .send_message(chat_id, "Unsubscribed from daily report".to_string())
+            .await;
+        repository
+            .unsubscribe_from_daily_report(chat_id, true)
+            .await;
     }
     Ok(())
 }

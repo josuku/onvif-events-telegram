@@ -67,48 +67,85 @@ async fn start_bot(telegram_bot: Arc<TelegramBot>) {
 }
 
 async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
+    let mut last_polling = chrono::Local::now();
     loop {
-        for mut camera in repository.get_cameras().await {
-            let msg = match camera.client.get_event_message().await {
-                Ok(msg) => msg,
-                Err(err) => {
-                    error!("error getting pull message: {}", err);
-                    continue;
-                }
-            };
+        check_for_detections(telegram_bot.clone(), repository.clone()).await;
+        manage_daily_report(telegram_bot.clone(), repository.clone(), last_polling).await;
 
-            if is_new_detection(&msg) {
-                if let Some(snapshot_uri) = &camera.snapshot_uri {
-                    let snapshot = match download_picture(snapshot_uri).await {
-                        Ok(snapshot) => snapshot,
-                        Err(err) => {
-                            error!("error getting snapshot: {}", err);
-                            continue;
-                        }
-                    };
-                    telegram_bot
-                        .send_notification(
-                            make_caption(
-                                "New Detection",
-                                &camera.name,
-                                &msg.current_time.value.to_utc(),
-                            ),
-                            snapshot.clone(),
-                            camera.subscriptors.clone(),
-                            camera.id,
-                        )
-                        .await;
-                }
-                println!(
-                    "{} - new detection in camera:{}",
-                    msg.current_time, camera.name
-                );
-            }
-        }
+        last_polling = chrono::Local::now();
 
         tokio::time::sleep(tokio::time::Duration::from_secs(
             repository.get_polling_seconds().await,
         ))
         .await;
+    }
+}
+
+async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
+    for mut camera in repository.get_cameras().await {
+        let msg = match camera.client.get_event_message().await {
+            Ok(msg) => msg,
+            Err(err) => {
+                error!("error getting pull message: {}", err);
+                return;
+            }
+        };
+
+        if is_new_detection(&msg) {
+            if let Some(snapshot_uri) = &camera.snapshot_uri {
+                let snapshot = match download_picture(snapshot_uri).await {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        error!("error getting snapshot: {}", err);
+                        return;
+                    }
+                };
+                telegram_bot
+                    .send_notification(
+                        make_caption(
+                            "New Detection",
+                            &camera.name,
+                            &msg.current_time.value.to_utc(),
+                        ),
+                        snapshot.clone(),
+                        camera.subscriptors.clone(),
+                        camera.id,
+                    )
+                    .await;
+            }
+            println!(
+                "{} - new detection in camera:{}",
+                msg.current_time, camera.name
+            );
+        }
+    }
+}
+
+async fn manage_daily_report(
+    telegram_bot: Arc<TelegramBot>,
+    repository: Arc<MemoryRepository>,
+    last_polling: chrono::DateTime<chrono::Local>,
+) {
+    let now = chrono::Local::now();
+    let chat_ids = repository.get_daily_report_subscriptors().await;
+    if !chat_ids.is_empty() && last_polling.date_naive() != now.date_naive() {
+        println!("Sending daily report: {}", now.format("%Y-%m-%d %H:%M:%S"));
+
+        let mut report = String::new();
+        report.push_str(&format!("Daily report {}\n", last_polling.date_naive()));
+
+        for camera in repository.get_cameras().await {
+            let notifications = repository.get_today_camera_notifications(camera.id).await;
+            report.push_str(&format!(
+                " - Camera {}-{}: {} detections",
+                camera.id,
+                camera.name,
+                notifications.len()
+            ));
+        }
+
+        telegram_bot.send_message(report, chat_ids).await;
+
+        repository.clear_today_notifications().await;
     }
 }

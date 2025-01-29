@@ -86,4 +86,10 @@ impl TelegramBot {
         }
         Ok(())
     }
+
+    pub async fn send_message(&self, message: String, chat_ids: Vec<ChatId>) {
+        for chat_id in chat_ids {
+            let _ = self.client.send_message(chat_id, message.clone()).await;
+        }
+    }
 }

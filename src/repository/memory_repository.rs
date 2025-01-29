@@ -46,6 +46,8 @@ pub struct MemoryRepository {
     repo_store: Arc<DbStore>,
     #[allow(clippy::type_complexity)]
     last_notifications: Mutex<HashMap<(CameraId, ChatId), Option<chrono::DateTime<Utc>>>>,
+    today_notifications: Mutex<HashMap<CameraId, Vec<chrono::DateTime<Utc>>>>,
+    daily_report_subscriptors: Mutex<Vec<ChatId>>,
 }
 impl MemoryRepository {
     pub fn new(polling_seconds: u64, between_seconds: u64, repo_store: Arc<DbStore>) -> Self {
@@ -55,6 +57,8 @@ impl MemoryRepository {
             between_seconds: Mutex::new(between_seconds),
             repo_store,
             last_notifications: Mutex::new(HashMap::new()),
+            today_notifications: Mutex::new(HashMap::new()),
+            daily_report_subscriptors: Mutex::new(Vec::new()),
         }
     }
 
@@ -94,6 +98,17 @@ impl MemoryRepository {
             }
         }
 
+        match self.repo_store.get_daily_report_subscriptors() {
+            Ok(subscriptors) => {
+                for chat_id in subscriptors {
+                    let _ = self.subscribe_to_daily_report(chat_id, false).await;
+                }
+            }
+            Err(err) => {
+                error!("cannot load daily report subscriptors: {}", err);
+            }
+        };
+
         Ok(())
     }
 
@@ -131,7 +146,35 @@ impl MemoryRepository {
 
     pub async fn update_last_notification_time(&self, camera_id: CameraId, chat_id: ChatId) {
         let mut last_notifications = self.last_notifications.lock().await;
-        last_notifications.insert((camera_id, chat_id), Some(chrono::Utc::now()));
+        let now = chrono::Utc::now();
+        last_notifications.insert((camera_id, chat_id), Some(now));
+        self.update_today_notification(camera_id, now).await;
+    }
+
+    pub async fn get_today_camera_notifications(
+        &self,
+        camera_id: CameraId,
+    ) -> Vec<chrono::DateTime<Utc>> {
+        let today_notifications = self.today_notifications.lock().await;
+        if let Some(camera_notifications) = today_notifications.get(&camera_id) {
+            return camera_notifications.to_vec();
+        }
+        Vec::new()
+    }
+
+    async fn update_today_notification(&self, camera_id: CameraId, now: chrono::DateTime<Utc>) {
+        let mut today_notifications = self.today_notifications.lock().await;
+        match today_notifications.get_mut(&camera_id) {
+            Some(camera_notifications) => camera_notifications.push(now),
+            None => {
+                today_notifications.insert(camera_id, vec![now]);
+            }
+        }
+    }
+
+    pub async fn clear_today_notifications(&self) {
+        let mut today_notifications = self.today_notifications.lock().await;
+        today_notifications.clear();
     }
 
     pub async fn add_camera(&self, mut camera: Camera) -> anyhow::Result<()> {
@@ -175,7 +218,8 @@ impl MemoryRepository {
             camera.subscriptors.push(chat_id);
 
             if update_store {
-                self.repo_store.insert_subscription(camera_id, chat_id);
+                self.repo_store
+                    .insert_camera_subscription(camera_id, chat_id);
             }
 
             Ok(())
@@ -199,7 +243,8 @@ impl MemoryRepository {
             camera.subscriptors.retain(|cid| *cid != chat_id);
 
             if update_store {
-                self.repo_store.remove_subscription(camera_id, chat_id);
+                self.repo_store
+                    .remove_camera_subscription(camera_id, chat_id);
             }
 
             Ok(())
@@ -287,5 +332,28 @@ impl MemoryRepository {
             }
         }
         Ok(())
+    }
+
+    pub async fn subscribe_to_daily_report(&self, chat_id: ChatId, update_store: bool) {
+        let mut subscriptors = self.daily_report_subscriptors.lock().await;
+        subscriptors.push(chat_id);
+
+        if update_store {
+            self.repo_store.insert_daily_report_subscription(chat_id);
+        }
+    }
+
+    pub async fn unsubscribe_from_daily_report(&self, chat_id: ChatId, update_store: bool) {
+        let mut subscriptors = self.daily_report_subscriptors.lock().await;
+        subscriptors.retain(|&s| s != chat_id);
+
+        if update_store {
+            self.repo_store.remove_daily_report_subscription(chat_id);
+        }
+    }
+
+    pub async fn get_daily_report_subscriptors(&self) -> Vec<ChatId> {
+        let subscriptors = self.daily_report_subscriptors.lock().await;
+        subscriptors.to_vec()
     }
 }

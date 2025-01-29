@@ -58,6 +58,14 @@ impl DbStore {
         ";
         connection.execute(query, ()).unwrap();
 
+        query = "
+            CREATE TABLE IF NOT EXISTS daily_report_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL
+            );
+        ";
+        connection.execute(query, ()).unwrap();
+
         // TODO polling seconds in config table?
     }
 
@@ -172,7 +180,11 @@ impl DbStore {
             .unwrap();
     }
 
-    pub fn insert_subscription(&self, camera_id: CameraId, chat_id: ChatId) -> SubscriptionId {
+    pub fn insert_camera_subscription(
+        &self,
+        camera_id: CameraId,
+        chat_id: ChatId,
+    ) -> SubscriptionId {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
@@ -184,7 +196,7 @@ impl DbStore {
         connection.last_insert_rowid()
     }
 
-    pub fn remove_subscription(&self, camera_id: CameraId, chat_id: ChatId) {
+    pub fn remove_camera_subscription(&self, camera_id: CameraId, chat_id: ChatId) {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
@@ -192,5 +204,45 @@ impl DbStore {
                 [camera_id, chat_id.0],
             )
             .unwrap();
+    }
+
+    pub fn insert_daily_report_subscription(&self, chat_id: ChatId) -> SubscriptionId {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "INSERT INTO daily_report_subscriptions (chat_id) values (?1)",
+                [chat_id.0],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    pub fn remove_daily_report_subscription(&self, chat_id: ChatId) {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "DELETE FROM daily_report_subscriptions WHERE chat_id=(?1)",
+                [chat_id.0],
+            )
+            .unwrap();
+    }
+
+    pub fn get_daily_report_subscriptors(&self) -> anyhow::Result<Vec<ChatId>> {
+        let connection = self.connection.lock().unwrap();
+
+        let mut chat_ids: Vec<ChatId> = Vec::new();
+
+        let mut stmt = connection.prepare("SELECT chat_id FROM daily_report_subscriptions")?;
+
+        let db_chat_ids = stmt.query_map([], |row| Ok(ChatId(row.get("Chat_id")?)))?;
+
+        for chat_id in db_chat_ids {
+            match chat_id {
+                Ok(chat_id) => chat_ids.push(chat_id),
+                Err(err) => error!("cannot get chat_id: {}", err),
+            }
+        }
+
+        Ok(chat_ids)
     }
 }
