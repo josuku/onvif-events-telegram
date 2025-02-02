@@ -2,7 +2,7 @@ extern crate onvif;
 
 use chrono::{NaiveDate, Utc};
 use futures_util::stream::StreamExt;
-use log::{debug, error};
+use log::{debug, error, warn};
 use onvif::discovery::{self, Device};
 use onvif::soap::client::Client;
 use onvif::soap::{self, client::AuthType};
@@ -80,7 +80,7 @@ impl OnvifClients {
             (None, None) => None,
             _ => panic!("username and password must be specified together"),
         };
-        println!("new OnvifClients. uri:{}", uri);
+        warn!("new OnvifClients. uri:{}", uri);
         let base_uri: Url = Url::parse(uri).unwrap();
         let devicemgmt_uri = base_uri.join("/onvif/device_service").unwrap();
         let auth_type = AuthType::Any;

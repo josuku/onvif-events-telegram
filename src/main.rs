@@ -6,7 +6,7 @@ mod telegram;
 mod utils;
 
 use config::AppConfig;
-use log::{error, info};
+use log::{error, info, warn};
 use onvif::onvif_camera::{download_picture, is_new_detection};
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
@@ -86,7 +86,7 @@ async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<Me
         let msg = match camera.client.get_event_message().await {
             Ok(msg) => msg,
             Err(err) => {
-                error!("error getting pull message: {}", err);
+                warn!("error getting pull message: {}", err);
                 return;
             }
         };
@@ -136,11 +136,16 @@ async fn manage_daily_report(
 
         for camera in repository.get_cameras().await {
             let notifications = repository.get_today_camera_notifications(camera.id).await;
+            let mut status = "";
+            if !camera.client.connected() {
+                status = " (disconnected)";
+            }
             report.push_str(&format!(
-                " - Camera {}-{}: {} detections",
+                " - Camera {}-{}: {} detections{}\n",
                 camera.id,
                 camera.name,
-                notifications.len()
+                notifications.len(),
+                status
             ));
         }
 

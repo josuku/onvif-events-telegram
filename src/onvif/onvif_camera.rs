@@ -1,7 +1,7 @@
 use super::onvif_clients::{get_snapshot_uris, OnvifClients};
 use crate::utils::create_onvif_user_and_fix_snapshot_uri;
 use anyhow::bail;
-use log::error;
+use log::{error, warn};
 use onvif::soap::client::{Client as SoapClient, ClientBuilder, Credentials};
 use schema::{
     b_2::NotificationMessageHolderType,
@@ -13,7 +13,7 @@ use url::Url;
 pub struct OnvifCamera {
     pub uri: String,
     pub credentials: Credentials,
-    clients: OnvifClients,
+    clients: Option<OnvifClients>,
     event_subscription: Option<SoapClient>,
 }
 
@@ -23,8 +23,13 @@ impl OnvifCamera {
             username: username.to_string(),
             password: password.to_string(),
         };
-        let clients = OnvifClients::new(uri, Some(username), Some(password)).await?;
-
+        let clients = match OnvifClients::new(uri, Some(username), Some(password)).await {
+            Ok(cli) => Some(cli),
+            Err(err) => {
+                error!("cannot create OnvifCamera clients. err:{}", err);
+                None
+            }
+        };
         Ok(Self {
             uri: uri.to_string(),
             credentials,
@@ -34,51 +39,71 @@ impl OnvifCamera {
     }
 
     pub async fn init(&mut self) {
-        if let Some(event) = &self.clients.event {
-            self.event_subscription = match self.create_event_pull_message_client(event).await {
-                Ok(pull_client) => Some(pull_client),
-                Err(err) => {
-                    error!("cannot create pull client. err:{}", err);
-                    None
+        if let Some(clients) = &self.clients {
+            if let Some(event) = &clients.event {
+                self.event_subscription = match self.create_event_pull_message_client(event).await {
+                    Ok(pull_client) => Some(pull_client),
+                    Err(err) => {
+                        error!("cannot create pull client. err:{}", err);
+                        None
+                    }
                 }
+            } else {
+                error!("cannot create event subscription for camera:{}", self.uri);
             }
         } else {
-            error!("cannot create event subscription for camera:{}", self.uri);
+            let clients = match OnvifClients::new(
+                &self.uri,
+                Some(&self.credentials.username),
+                Some(&self.credentials.password),
+            )
+            .await
+            {
+                Ok(cli) => Some(cli),
+                Err(err) => {
+                    warn!("cannot create OnvifCamera clients. err:{}", err);
+                    None
+                }
+            };
+            self.clients = clients;
         }
     }
 
     pub async fn get_snapshot_uri(&self) -> anyhow::Result<String> {
-        if let Some(media) = &self.clients.media {
-            // get onvif snapshot uris
-            match get_snapshot_uris(media).await {
-                Ok(snapshot_uris) => {
-                    for snapshot_uri in snapshot_uris {
-                        match download_picture(&snapshot_uri).await {
-                            Ok(_) => return Ok(snapshot_uri),
-                            Err(_) => {
-                                // if onvif uri doesnt work, create new user, replace credentials and try again
-                                match create_onvif_user_and_fix_snapshot_uri(
-                                    &self.uri,
-                                    &snapshot_uri,
-                                )
-                                .await
-                                {
-                                    Ok(fixed_url) => {
-                                        if download_picture(&fixed_url).await.is_ok() {
-                                            return Ok(fixed_url);
+        if let Some(clients) = &self.clients {
+            if let Some(media) = &clients.media {
+                // get onvif snapshot uris
+                match get_snapshot_uris(media).await {
+                    Ok(snapshot_uris) => {
+                        for snapshot_uri in snapshot_uris {
+                            match download_picture(&snapshot_uri).await {
+                                Ok(_) => return Ok(snapshot_uri),
+                                Err(_) => {
+                                    // if onvif uri doesnt work, create new user, replace credentials and try again
+                                    match create_onvif_user_and_fix_snapshot_uri(
+                                        &self.uri,
+                                        &snapshot_uri,
+                                    )
+                                    .await
+                                    {
+                                        Ok(fixed_url) => {
+                                            if download_picture(&fixed_url).await.is_ok() {
+                                                return Ok(fixed_url);
+                                            }
                                         }
+                                        Err(err) => bail!("{}", err),
                                     }
-                                    Err(err) => bail!("{}", err),
                                 }
                             }
                         }
+                        bail!("cannot download picture");
                     }
-                    bail!("cannot download picture");
+                    Err(err) => bail!("cannot get snapshot: {}", err),
                 }
-                Err(err) => bail!("cannot get snapshot: {}", err),
             }
+            bail!("media client not initilialized for camera: {}", self.uri)
         }
-        bail!("media client not initilialized for camera: {}", self.uri)
+        bail!("no clients initilialized for camera: {}", self.uri)
     }
 
     pub async fn get_event_message(&mut self) -> anyhow::Result<PullMessagesResponse> {
@@ -104,6 +129,10 @@ impl OnvifCamera {
             self.init().await;
         }
         bail!("client not registered");
+    }
+
+    pub fn connected(&self) -> bool {
+        self.clients.is_some()
     }
 
     async fn create_event_pull_message_client(
