@@ -6,6 +6,7 @@ use onvif::discovery::Device;
 use std::{collections::HashMap, fmt, sync::Arc};
 use teloxide::types::ChatId;
 use tokio::sync::Mutex;
+use url::Url;
 
 use super::db_store::DbStore;
 
@@ -48,6 +49,7 @@ pub struct MemoryRepository {
     last_notifications: Mutex<HashMap<(CameraId, ChatId), Option<chrono::DateTime<Utc>>>>,
     today_notifications: Mutex<HashMap<CameraId, Vec<chrono::DateTime<Utc>>>>,
     daily_report_subscriptors: Mutex<Vec<ChatId>>,
+    last_polling: Mutex<HashMap<CameraId, chrono::DateTime<Utc>>>,
 }
 impl MemoryRepository {
     pub fn new(polling_seconds: u64, between_seconds: u64, repo_store: Arc<DbStore>) -> Self {
@@ -59,6 +61,7 @@ impl MemoryRepository {
             last_notifications: Mutex::new(HashMap::new()),
             today_notifications: Mutex::new(HashMap::new()),
             daily_report_subscriptors: Mutex::new(Vec::new()),
+            last_polling: Mutex::new(HashMap::new()),
         }
     }
 
@@ -115,6 +118,13 @@ impl MemoryRepository {
     pub async fn get_cameras(&self) -> Vec<Camera> {
         let cameras = self.cameras.lock().await;
         cameras.values().cloned().collect()
+    }
+
+    pub async fn get_sorted_cameras(&self) -> Vec<Camera> {
+        let cameras = self.cameras.lock().await;
+        let mut vec: Vec<(i64, Camera)> = cameras.clone().into_iter().collect();
+        vec.sort_by(|a, b| a.0.cmp(&b.0));
+        vec.into_iter().map(|(_, camera)| camera).collect()
     }
 
     pub async fn get_camera(&self, camera_id: CameraId) -> Option<Camera> {
@@ -175,6 +185,26 @@ impl MemoryRepository {
     pub async fn clear_today_notifications(&self) {
         let mut today_notifications = self.today_notifications.lock().await;
         today_notifications.clear();
+    }
+
+    pub async fn get_last_polling_from_camera(
+        &self,
+        camera_id: CameraId,
+    ) -> Option<chrono::DateTime<Utc>> {
+        let last_polling = self.last_polling.lock().await;
+        match last_polling.get(&camera_id) {
+            Some(time) => Some(*time),
+            None => None,
+        }
+    }
+
+    pub async fn update_last_polling_from_camera(
+        &self,
+        camera_id: CameraId,
+        now: chrono::DateTime<Utc>,
+    ) {
+        let mut last_polling = self.last_polling.lock().await;
+        last_polling.insert(camera_id, now);
     }
 
     pub async fn add_camera(&self, mut camera: Camera) -> anyhow::Result<()> {
@@ -263,6 +293,22 @@ impl MemoryRepository {
         *between_seconds = seconds;
     }
 
+    pub async fn update_uri_from_camera(
+        &self,
+        camera_id: CameraId,
+        uri: &str,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.client.uri = uri.to_string();
+                self.repo_store.update_uri_from_camera(camera_id, uri);
+            }
+            None => bail!("cannot find camera {}", camera_id),
+        }
+        Ok(())
+    }
+
     pub async fn update_snapshot_uri_from_camera(
         &self,
         camera_id: CameraId,
@@ -281,21 +327,16 @@ impl MemoryRepository {
     }
 
     pub async fn update_repository_cameras(&self, new_devices: &[Device]) -> anyhow::Result<()> {
+        let current_cameras = self.get_cameras().await;
         for new_device in new_devices {
-            if !self
-                .get_cameras()
-                .await
+            if !current_cameras
                 .iter()
                 .any(|camera| camera.address == new_device.address)
             {
                 let mut uri = "".to_string();
                 if !new_device.urls.is_empty() {
                     if let Some(url) = new_device.urls.first() {
-                        uri = format!(
-                            "http://{}:{}",
-                            url.host_str().unwrap_or_default(),
-                            url.port().unwrap_or_default(),
-                        );
+                        uri = make_uri(url);
                     }
                 }
 
@@ -329,6 +370,31 @@ impl MemoryRepository {
                 {
                     bail!("{}", err);
                 }
+            } else if let Some(camera) = current_cameras
+                .iter()
+                .find(|cam| cam.address == new_device.address)
+            {
+                if let Some(new_url) = new_device.urls.first() {
+                    let new_uri = make_uri(new_url);
+                    if camera.client.uri != new_uri {
+                        println!(
+                            "Updating host of camera:{} -> prev:{} new:{}",
+                            camera.id, camera.client.uri, new_url
+                        );
+                        let _ = self.update_uri_from_camera(camera.id, &new_uri).await;
+
+                        if let Some(snapshot_uri) = &camera.snapshot_uri {
+                            if let Ok(prev_url) = Url::parse(snapshot_uri) {
+                                let prev_host = prev_url.host_str().unwrap_or_default();
+                                let new_host = new_url.host_str().unwrap_or_default();
+                                let new_snapshot_uri = snapshot_uri.replace(&prev_host, &new_host);
+                                let _ = self
+                                    .update_snapshot_uri_from_camera(camera.id, &new_snapshot_uri)
+                                    .await;
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -356,4 +422,12 @@ impl MemoryRepository {
         let subscriptors = self.daily_report_subscriptors.lock().await;
         subscriptors.to_vec()
     }
+}
+
+fn make_uri(url: &Url) -> String {
+    format!(
+        "http://{}:{}",
+        url.host_str().unwrap_or_default(),
+        url.port().unwrap_or_default(),
+    )
 }

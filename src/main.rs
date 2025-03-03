@@ -82,6 +82,8 @@ async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRep
 }
 
 async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
+    let now = chrono::Utc::now();
+
     for mut camera in repository.get_cameras().await {
         let msg = match camera.client.get_event_message().await {
             Ok(msg) => msg,
@@ -90,6 +92,10 @@ async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<Me
                 return;
             }
         };
+
+        repository
+            .update_last_polling_from_camera(camera.id, now)
+            .await;
 
         if is_new_detection(&msg) {
             if let Some(snapshot_uri) = &camera.snapshot_uri {
@@ -134,23 +140,45 @@ async fn manage_daily_report(
         let mut report = String::new();
         report.push_str(&format!("Daily report {}\n", last_polling.date_naive()));
 
-        for camera in repository.get_cameras().await {
+        for camera in repository.get_sorted_cameras().await {
             let notifications = repository.get_today_camera_notifications(camera.id).await;
             let mut status = "";
             if !camera.client.connected() {
-                status = " (disconnected)";
+                status = "\n (disconnected)";
             }
+            let mut last_sync = "".to_string();
+            if let Some(last_polling_time) =
+                repository.get_last_polling_from_camera(camera.id).await
+            {
+                last_sync = format!("\n   (sync: {})", time_ago(now.to_utc(), last_polling_time));
+            }
+
             report.push_str(&format!(
-                " - Camera {}-{}: {} detections{}\n",
+                " - Camera {}-{}: {} detections{}{}\n",
                 camera.id,
                 camera.name,
                 notifications.len(),
-                status
+                status,
+                last_sync,
             ));
         }
 
         telegram_bot.send_message(report, chat_ids).await;
 
         repository.clear_today_notifications().await;
+    }
+}
+
+fn time_ago(to: chrono::DateTime<chrono::Utc>, from: chrono::DateTime<chrono::Utc>) -> String {
+    let duration = to.signed_duration_since(from);
+
+    if duration.num_seconds() < 60 {
+        format!("{} secs ago", duration.num_seconds())
+    } else if duration.num_minutes() < 60 {
+        format!("{} mins ago", duration.num_minutes())
+    } else if duration.num_hours() < 24 {
+        format!("{} hours ago", duration.num_hours())
+    } else {
+        format!("{} days ago", duration.num_days())
     }
 }

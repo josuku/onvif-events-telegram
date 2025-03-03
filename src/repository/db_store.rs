@@ -169,6 +169,17 @@ impl DbStore {
         Ok(connection.last_insert_rowid())
     }
 
+    pub fn update_uri_from_camera(&self, camera_id: CameraId, uri: &str) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "UPDATE cameras SET uri = ?1 WHERE id = ?2",
+                [uri, &camera_id.to_string()],
+            )
+            .unwrap();
+    }
+
     pub fn update_snapshot_uri_from_camera(&self, camera_id: CameraId, snapshot_uri: &str) {
         let connection = self.connection.lock().unwrap();
 
