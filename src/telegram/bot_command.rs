@@ -19,6 +19,8 @@ pub enum BotCommand {
     Help,
     #[command(description = "get available cameras.")]
     GetCameras,
+    #[command(description = "set camera name. params camera_id camera_name")]
+    SetCameraName(String),
     #[command(description = "subscribe to camera id. params camera_id")]
     Subscribe(CameraId),
     #[command(description = "unsubscribe from camera id. params: camera_id")]
@@ -30,7 +32,7 @@ pub enum BotCommand {
     // GetSnapshotEvery(CameraId, String),
     #[command(description = "set detection checker polling time in seconds.")]
     SetPollingTime(u64),
-    #[command(description = "set time between notifications.")]
+    #[command(description = "set seconds between notifications.")]
     SetBetweenTime(u64),
     #[command(description = "fix snapshot uri camera id. params: camera_id")]
     FixSnapshot(CameraId),
@@ -55,6 +57,22 @@ pub async fn command_handler(
     match cmd {
         BotCommand::Help => help_cmd(bot, msg.chat.id).await?,
         BotCommand::GetCameras => get_cameras_cmd(bot, msg.chat.id, repository).await?,
+        BotCommand::SetCameraName(camera_id_and_name) => {
+            let mut parts = camera_id_and_name.split_whitespace();
+            let camera_id = match parts.next() {
+                Some(id) => match id.parse::<CameraId>() {
+                    Ok(parsed_id) => parsed_id,
+                    Err(_) => return response_result_error("cannot parse camera id".to_string()),
+                },
+                None => return response_result_error("cannot parse camera id".to_string()),
+            };
+            let camera_name = match parts.next() {
+                Some(name) => name,
+                None => return response_result_error("cannot parse camera name".to_string()),
+            };
+
+            set_camera_name_cmd(bot, msg.chat.id, repository, camera_id, camera_name).await?
+        }
         BotCommand::Subscribe(camera_id) => {
             subscribe_cmd(bot, msg.chat.id, repository, camera_id).await?
         }
@@ -112,6 +130,27 @@ async fn get_cameras_cmd(
             bot.send_message(chat_id, camera.to_string()).await?;
         }
     }
+    Ok(())
+}
+
+async fn set_camera_name_cmd(
+    bot: Bot,
+    chat_id: ChatId,
+    repository: Arc<MemoryRepository>,
+    camera_id: CameraId,
+    camera_name: &str,
+) -> ResponseResult<()> {
+    info!(
+        "command SubsSetCameraName - chat id:{} camera_id:{} camera_name:{}",
+        chat_id, camera_id, camera_name
+    );
+    let _ = match repository.set_camera_name(camera_id, camera_name).await {
+        Ok(_) => {
+            bot.send_message(chat_id, "Camera name updated successfully".to_string())
+                .await
+        }
+        Err(err) => bot.send_message(chat_id, format!("{}", err)).await,
+    };
     Ok(())
 }
 
@@ -177,9 +216,7 @@ async fn get_snapshot_cmd(
         None => {
             let error = format!("cannot find camera with id: {}", camera_id);
             print_and_send_error(&bot, &error, chat_id).await;
-            return ResponseResult::Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
-                error,
-            )));
+            return response_result_error(error);
         }
     };
 
@@ -192,9 +229,7 @@ async fn get_snapshot_cmd(
                     snapshot_uri, err
                 );
                 print_and_send_error(&bot, &error, chat_id).await;
-                return ResponseResult::Err(teloxide::RequestError::Api(
-                    teloxide::ApiError::Unknown(error),
-                ));
+                return response_result_error(error);
             }
         };
         _ = telegram_bot
@@ -264,9 +299,7 @@ async fn fix_snapshot_uri_cmd(
         None => {
             let error = format!("cannot find camera with id: {}", camera_id);
             print_and_send_error(&bot, &error, chat_id).await;
-            return ResponseResult::Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
-                error,
-            )));
+            return response_result_error(error);
         }
     };
 
@@ -285,26 +318,20 @@ async fn fix_snapshot_uri_cmd(
                     Err(err) => {
                         let error = format!("{}", err);
                         print_and_send_error(&bot, &error, chat_id).await;
-                        return ResponseResult::Err(teloxide::RequestError::Api(
-                            teloxide::ApiError::Unknown(error),
-                        ));
+                        return response_result_error(error);
                     }
                 }
             }
             Err(err) => {
                 let error = format!("{}", err);
                 print_and_send_error(&bot, &error, chat_id).await;
-                return ResponseResult::Err(teloxide::RequestError::Api(
-                    teloxide::ApiError::Unknown(error),
-                ));
+                return response_result_error(error);
             }
         }
     } else {
         let error = format!("camera {} does not have snapshot uri", camera.client.uri);
         print_and_send_error(&bot, &error, chat_id).await;
-        return ResponseResult::Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
-            error,
-        )));
+        return response_result_error(error);
     }
     Ok(())
 }
@@ -334,4 +361,10 @@ async fn enable_daily_report_cmd(
 async fn print_and_send_error(bot: &Bot, error: &str, chat_id: ChatId) {
     error!("{}", error);
     let _ = bot.send_message(chat_id, error).await;
+}
+
+fn response_result_error(error: String) -> ResponseResult<()> {
+    ResponseResult::Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+        error,
+    )))
 }

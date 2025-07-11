@@ -180,6 +180,17 @@ impl DbStore {
             .unwrap();
     }
 
+    pub fn update_name_from_camera(&self, camera_id: CameraId, camera_name: &str) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "UPDATE cameras SET name = ?1 WHERE id = ?2",
+                [camera_name, &camera_id.to_string()],
+            )
+            .unwrap();
+    }
+
     pub fn update_snapshot_uri_from_camera(&self, camera_id: CameraId, snapshot_uri: &str) {
         let connection = self.connection.lock().unwrap();
 

@@ -192,10 +192,7 @@ impl MemoryRepository {
         camera_id: CameraId,
     ) -> Option<chrono::DateTime<Utc>> {
         let last_polling = self.last_polling.lock().await;
-        match last_polling.get(&camera_id) {
-            Some(time) => Some(*time),
-            None => None,
-        }
+        last_polling.get(&camera_id).copied()
     }
 
     pub async fn update_last_polling_from_camera(
@@ -277,6 +274,18 @@ impl MemoryRepository {
                     .remove_camera_subscription(camera_id, chat_id);
             }
 
+            Ok(())
+        } else {
+            bail!("camera {} not found", camera_id)
+        }
+    }
+
+    pub async fn set_camera_name(&self, camera_id: i64, camera_name: &str) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get_mut(&camera_id) {
+            camera.name = camera_name.to_string();
+            self.repo_store
+                .update_name_from_camera(camera_id, camera_name);
             Ok(())
         } else {
             bail!("camera {} not found", camera_id)
@@ -387,7 +396,7 @@ impl MemoryRepository {
                             if let Ok(prev_url) = Url::parse(snapshot_uri) {
                                 let prev_host = prev_url.host_str().unwrap_or_default();
                                 let new_host = new_url.host_str().unwrap_or_default();
-                                let new_snapshot_uri = snapshot_uri.replace(&prev_host, &new_host);
+                                let new_snapshot_uri = snapshot_uri.replace(prev_host, new_host);
                                 let _ = self
                                     .update_snapshot_uri_from_camera(camera.id, &new_snapshot_uri)
                                     .await;
