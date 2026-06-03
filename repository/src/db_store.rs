@@ -1,10 +1,10 @@
-use crate::{CameraId, SubscriptionId};
 use anyhow::bail;
+use app_core::{CameraId, ChatId, SubscriptionId};
 use log::error;
-use onvif::soap::client::Credentials;
 use rusqlite::Connection;
 use std::sync::Mutex;
-use teloxide::types::ChatId;
+// use crate::memory_repository::ChatId;
+// use teloxide::types::ChatId;
 
 pub struct DbCamera {
     pub id: CameraId,
@@ -24,6 +24,12 @@ pub struct DbCameraSubscription {
 
 pub struct DbStore {
     connection: Mutex<Connection>,
+}
+
+impl Default for DbStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DbStore {
@@ -102,7 +108,7 @@ impl DbStore {
         let stored_subscriptions = stmt.query_map([], |row| {
             Ok(DbCameraSubscription {
                 camera_id: row.get("camera_id")?,
-                chat_id: ChatId(row.get("Chat_id")?),
+                chat_id: row.get("Chat_id")?,
             })
         })?;
         for stored_subscription in stored_subscriptions {
@@ -132,7 +138,8 @@ impl DbStore {
         name: &str,
         uri: &str,
         address: &str,
-        credentials: &Credentials,
+        username: &str,
+        password: &str,
         snapshot_uri: &Option<String>,
     ) -> anyhow::Result<CameraId> {
         let connection = self.connection.lock().unwrap();
@@ -145,8 +152,8 @@ impl DbStore {
                     name,
                     uri,
                     address,
-                    credentials.username.as_str(),
-                    credentials.password.as_str(),
+                    username,
+                    password,
                     snapshot_uri.as_str(),
                 ],
             ) {
@@ -155,13 +162,7 @@ impl DbStore {
         } else if let Err(err) = connection.execute(
             "INSERT INTO cameras (name, uri, address, username, password) 
                 values (?1, ?2, ?3, ?4, ?5)",
-            [
-                name,
-                uri,
-                address,
-                credentials.username.as_str(),
-                credentials.password.as_str(),
-            ],
+            [name, uri, address, username, password],
         ) {
             bail!("cannot insert camera: {}", err)
         }
@@ -212,7 +213,7 @@ impl DbStore {
             .execute(
                 "INSERT INTO camera_subscriptions (camera_id, chat_id) 
                 values (?1, ?2)",
-                [camera_id, chat_id.0],
+                [camera_id, chat_id],
             )
             .unwrap();
         connection.last_insert_rowid()
@@ -223,7 +224,7 @@ impl DbStore {
         connection
             .execute(
                 "DELETE FROM camera_subscriptions WHERE camera_id=(?1) AND chat_id=(?2)",
-                [camera_id, chat_id.0],
+                [camera_id, chat_id],
             )
             .unwrap();
     }
@@ -233,7 +234,7 @@ impl DbStore {
         connection
             .execute(
                 "INSERT INTO daily_report_subscriptions (chat_id) values (?1)",
-                [chat_id.0],
+                [chat_id],
             )
             .unwrap();
         connection.last_insert_rowid()
@@ -244,7 +245,7 @@ impl DbStore {
         connection
             .execute(
                 "DELETE FROM daily_report_subscriptions WHERE chat_id=(?1)",
-                [chat_id.0],
+                [chat_id],
             )
             .unwrap();
     }
@@ -256,7 +257,7 @@ impl DbStore {
 
         let mut stmt = connection.prepare("SELECT chat_id FROM daily_report_subscriptions")?;
 
-        let db_chat_ids = stmt.query_map([], |row| Ok(ChatId(row.get("Chat_id")?)))?;
+        let db_chat_ids = stmt.query_map([], |row| row.get("Chat_id"))?;
 
         for chat_id in db_chat_ids {
             match chat_id {

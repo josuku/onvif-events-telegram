@@ -1,22 +1,10 @@
-use crate::onvif::onvif_clients::{
-    create_default_user, get_users, DEFAULT_PASSWORD, DEFAULT_USERNAME,
-};
-use anyhow::bail;
 use url::Url;
 
-pub fn make_caption(title: &str, name: &str, time: &chrono::DateTime<chrono::Utc>) -> String {
-    let converted: chrono::DateTime<chrono::Local> = chrono::DateTime::from(*time);
-    // println!("utc:{} local:{}", time, converted);
-    format!(
-        r#"
-{}
-Camera:{}
-Time: {}"#,
-        title.to_uppercase(),
-        name,
-        converted
-    )
-}
+use crate::onvif_clients::{create_default_user, get_users, DEFAULT_PASSWORD, DEFAULT_USERNAME};
+
+mod network;
+pub mod onvif_camera;
+pub mod onvif_clients;
 
 pub async fn create_onvif_user_and_fix_snapshot_uri(
     camera_uri: &str,
@@ -26,7 +14,7 @@ pub async fn create_onvif_user_and_fix_snapshot_uri(
         Ok(users) => {
             if !users.contains(&DEFAULT_USERNAME.to_string()) {
                 if let Err(err) = create_default_user(camera_uri).await {
-                    bail!("cannot create user {}. error:{}", DEFAULT_USERNAME, err);
+                    anyhow::bail!("cannot create user {}. error:{}", DEFAULT_USERNAME, err);
                 }
             }
             Ok(replace_snapshot_uri_credentials(
@@ -36,7 +24,7 @@ pub async fn create_onvif_user_and_fix_snapshot_uri(
             ))
         }
         Err(_) => {
-            bail!("cannot get users of camera:{}", camera_uri)
+            anyhow::bail!("cannot get users of camera:{}", camera_uri)
         }
     }
 }

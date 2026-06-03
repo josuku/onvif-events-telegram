@@ -1,0 +1,15 @@
+[package]
+name = "repository"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.86"
+chrono = "0.4.38"
+log = "0.4.22"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+tokio = { version = "1" }
+url = "2.2.0"
+
+app-core = { path = "../app-core" }
+onvif = { path = "../onvif" }

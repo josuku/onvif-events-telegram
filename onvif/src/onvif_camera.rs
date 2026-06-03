@@ -1,5 +1,5 @@
 use super::onvif_clients::{get_snapshot_uris, OnvifClients};
-use crate::utils::create_onvif_user_and_fix_snapshot_uri;
+use crate::create_onvif_user_and_fix_snapshot_uri;
 use anyhow::bail;
 use log::{error, warn};
 use onvif::soap::client::{Client as SoapClient, ClientBuilder, Credentials};

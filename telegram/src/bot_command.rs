@@ -1,13 +1,18 @@
 use super::telegram_bot::TelegramBot;
-use crate::{
-    onvif::{onvif_camera::download_picture, onvif_clients::camera_discovery},
-    repository::memory_repository::MemoryRepository,
-    utils::{create_onvif_user_and_fix_snapshot_uri, make_caption},
-    CameraId,
-};
+use app_core::{make_caption, CameraId};
 use log::{error, info};
+use onvif::{
+    create_onvif_user_and_fix_snapshot_uri, onvif_camera::download_picture,
+    onvif_clients::camera_discovery,
+};
+use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
-use teloxide::{prelude::*, types::Message, utils::command::BotCommands, Bot};
+use teloxide::{
+    requests::{Requester, ResponseResult},
+    types::{ChatId, Message},
+    utils::command::BotCommands,
+    Bot,
+};
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -125,7 +130,7 @@ async fn get_cameras_cmd(
         bot.send_message(chat_id, "Available cameras are:".to_string())
             .await?;
 
-        cameras.sort_by(|a, b| a.id.cmp(&b.id));
+        cameras.sort_by_key(|a| a.id);
         for camera in cameras {
             bot.send_message(chat_id, camera.to_string()).await?;
         }
@@ -165,7 +170,7 @@ async fn subscribe_cmd(
         chat_id, camera_id
     );
     let _ = match repository
-        .subscribe_to_camera(camera_id, chat_id, true)
+        .subscribe_to_camera(camera_id, chat_id.0, true)
         .await
     {
         Ok(_) => {
@@ -188,7 +193,7 @@ async fn unsubscribe_cmd(
         chat_id, camera_id
     );
     let _ = match repository
-        .unsubscribe_from_camera(camera_id, chat_id, true)
+        .unsubscribe_from_camera(camera_id, chat_id.0, true)
         .await
     {
         Ok(_) => {
@@ -236,7 +241,7 @@ async fn get_snapshot_cmd(
             .send_picture(
                 &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
                 snapshot.clone(),
-                chat_id,
+                chat_id.0,
             )
             .await;
     } else {
@@ -346,13 +351,13 @@ async fn enable_daily_report_cmd(
         let _ = bot
             .send_message(chat_id, "Subscribed to daily report".to_string())
             .await;
-        repository.subscribe_to_daily_report(chat_id, true).await;
+        repository.subscribe_to_daily_report(chat_id.0, true).await;
     } else {
         let _ = bot
             .send_message(chat_id, "Unsubscribed from daily report".to_string())
             .await;
         repository
-            .unsubscribe_from_daily_report(chat_id, true)
+            .unsubscribe_from_daily_report(chat_id.0, true)
             .await;
     }
     Ok(())

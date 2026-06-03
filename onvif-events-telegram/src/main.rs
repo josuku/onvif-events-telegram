@@ -1,10 +1,6 @@
 mod config;
-mod network;
-mod onvif;
-mod repository;
-mod telegram;
-mod utils;
 
+use app_core::make_caption;
 use config::AppConfig;
 use log::{error, info, warn};
 use onvif::onvif_camera::{download_picture, is_new_detection};
@@ -13,13 +9,9 @@ use repository::memory_repository::MemoryRepository;
 use std::{process::exit, sync::Arc};
 use telegram::telegram_bot::TelegramBot;
 use tokio::{select, signal};
-use utils::make_caption;
 
 const DEFAULT_POLLING_SECONDS: u64 = 1;
 const DEFAULT_BETWEEN_SECONDS: u64 = 15;
-
-type CameraId = i64;
-type SubscriptionId = i64;
 
 #[tokio::main]
 async fn main() {

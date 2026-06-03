@@ -1,8 +1,18 @@
 use super::bot_command::{command_handler, BotCommand};
-use crate::{repository::memory_repository::MemoryRepository, CameraId};
 use anyhow::bail;
+use app_core::{CameraId, ChatId};
+use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
-use teloxide::{prelude::*, types::InputFile, Bot};
+// use teloxide::{prelude::*, types::InputFile, Bot};
+use teloxide::{
+    dispatching::Dispatcher,
+    dispatching::{HandlerExt, UpdateFilterExt},
+    dptree,
+    payloads::SendPhotoSetters,
+    prelude::Requester,
+    types::{InputFile, Update},
+    Bot,
+};
 
 #[derive(Clone)]
 pub struct TelegramBot {
@@ -81,7 +91,13 @@ impl TelegramBot {
         chat_id: ChatId,
     ) -> anyhow::Result<()> {
         let file = InputFile::memory(picture.clone()).file_name("new_file.jpg");
-        if let Err(err) = self.client.send_photo(chat_id, file).caption(message).await {
+
+        if let Err(err) = self
+            .client
+            .send_photo(teloxide::prelude::ChatId(chat_id), file)
+            .caption(message)
+            .await
+        {
             bail!("cannot send picture to Telegram {:?}", err)
         }
         Ok(())
@@ -89,7 +105,10 @@ impl TelegramBot {
 
     pub async fn send_message(&self, message: String, chat_ids: Vec<ChatId>) {
         for chat_id in chat_ids {
-            let _ = self.client.send_message(chat_id, message.clone()).await;
+            let _ = self
+                .client
+                .send_message(teloxide::prelude::ChatId(chat_id), message.clone())
+                .await;
         }
     }
 }

@@ -1,10 +1,10 @@
-use crate::{onvif::onvif_camera::OnvifCamera, CameraId};
 use anyhow::bail;
+use app_core::{CameraId, ChatId};
 use chrono::Utc;
 use log::error;
-use onvif::discovery::Device;
+use onvif::{onvif_camera::OnvifCamera, onvif_clients::DiscoveryDevice};
 use std::{collections::HashMap, fmt, sync::Arc};
-use teloxide::types::ChatId;
+// use teloxide::types::ChatId;
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -79,7 +79,7 @@ impl MemoryRepository {
                 match OnvifCamera::new(&camera.uri, &camera.username, &camera.password).await {
                     Ok(cli) => cli,
                     Err(err) => {
-                        bail!("cannot create OnvifCamera:{}", err);
+                        anyhow::bail!("cannot create OnvifCamera:{}", err);
                     }
                 };
             client.init().await;
@@ -123,7 +123,7 @@ impl MemoryRepository {
     pub async fn get_sorted_cameras(&self) -> Vec<Camera> {
         let cameras = self.cameras.lock().await;
         let mut vec: Vec<(i64, Camera)> = cameras.clone().into_iter().collect();
-        vec.sort_by(|a, b| a.0.cmp(&b.0));
+        vec.sort_by_key(|a| a.0);
         vec.into_iter().map(|(_, camera)| camera).collect()
     }
 
@@ -217,7 +217,8 @@ impl MemoryRepository {
                 &camera.name,
                 &camera.client.uri,
                 &camera.address,
-                &camera.client.credentials,
+                &camera.client.credentials.username,
+                &camera.client.credentials.password,
                 &camera.snapshot_uri,
             ) {
                 Ok(id) => id,
@@ -335,7 +336,10 @@ impl MemoryRepository {
         Ok(())
     }
 
-    pub async fn update_repository_cameras(&self, new_devices: &[Device]) -> anyhow::Result<()> {
+    pub async fn update_repository_cameras(
+        &self,
+        new_devices: &[DiscoveryDevice],
+    ) -> anyhow::Result<()> {
         let current_cameras = self.get_cameras().await;
         for new_device in new_devices {
             if !current_cameras
@@ -343,10 +347,10 @@ impl MemoryRepository {
                 .any(|camera| camera.address == new_device.address)
             {
                 let mut uri = "".to_string();
-                if !new_device.urls.is_empty() {
-                    if let Some(url) = new_device.urls.first() {
-                        uri = make_uri(url);
-                    }
+                if !new_device.urls.is_empty()
+                    && let Some(url) = new_device.urls.first()
+                {
+                    uri = make_uri(url);
                 }
 
                 let mut client = match OnvifCamera::new(
@@ -361,10 +365,7 @@ impl MemoryRepository {
                 };
                 client.init().await;
 
-                let snapshot_uri = match client.get_snapshot_uri().await {
-                    Ok(uri) => Some(uri),
-                    Err(_) => None,
-                };
+                let snapshot_uri = client.get_snapshot_uri().await.ok();
 
                 if let Err(err) = self
                     .add_camera(Camera {
@@ -382,26 +383,25 @@ impl MemoryRepository {
             } else if let Some(camera) = current_cameras
                 .iter()
                 .find(|cam| cam.address == new_device.address)
+                && let Some(new_url) = new_device.urls.first()
             {
-                if let Some(new_url) = new_device.urls.first() {
-                    let new_uri = make_uri(new_url);
-                    if camera.client.uri != new_uri {
-                        println!(
-                            "Updating host of camera:{} -> prev:{} new:{}",
-                            camera.id, camera.client.uri, new_url
-                        );
-                        let _ = self.update_uri_from_camera(camera.id, &new_uri).await;
+                let new_uri = make_uri(new_url);
+                if camera.client.uri != new_uri {
+                    println!(
+                        "Updating host of camera:{} -> prev:{} new:{}",
+                        camera.id, camera.client.uri, new_url
+                    );
+                    let _ = self.update_uri_from_camera(camera.id, &new_uri).await;
 
-                        if let Some(snapshot_uri) = &camera.snapshot_uri {
-                            if let Ok(prev_url) = Url::parse(snapshot_uri) {
-                                let prev_host = prev_url.host_str().unwrap_or_default();
-                                let new_host = new_url.host_str().unwrap_or_default();
-                                let new_snapshot_uri = snapshot_uri.replace(prev_host, new_host);
-                                let _ = self
-                                    .update_snapshot_uri_from_camera(camera.id, &new_snapshot_uri)
-                                    .await;
-                            }
-                        }
+                    if let Some(snapshot_uri) = &camera.snapshot_uri
+                        && let Ok(prev_url) = Url::parse(snapshot_uri)
+                    {
+                        let prev_host = prev_url.host_str().unwrap_or_default();
+                        let new_host = new_url.host_str().unwrap_or_default();
+                        let new_snapshot_uri = snapshot_uri.replace(prev_host, new_host);
+                        let _ = self
+                            .update_snapshot_uri_from_camera(camera.id, &new_snapshot_uri)
+                            .await;
                     }
                 }
             }

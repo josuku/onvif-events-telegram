@@ -16,7 +16,15 @@ use crate::network::get_primary_ipv4_address;
 pub const DEFAULT_USERNAME: &str = "oet1";
 pub const DEFAULT_PASSWORD: &str = "oet12345";
 
-pub async fn camera_discovery() -> Vec<Device> {
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct DiscoveryDevice {
+    /// The WS-Discovery UUID / address reference
+    pub address: String,
+    pub name: Option<String>,
+    pub urls: Vec<Url>,
+}
+
+pub async fn camera_discovery() -> Vec<DiscoveryDevice> {
     // multicast discovery
     let mut devices = discovery::DiscoveryBuilder::default()
         .run()
@@ -52,6 +60,13 @@ pub async fn camera_discovery() -> Vec<Device> {
     }
 
     devices
+        .iter()
+        .map(|device| DiscoveryDevice {
+            address: device.address.clone(),
+            name: device.name.clone(),
+            urls: device.urls.clone(),
+        })
+        .collect()
 }
 
 #[derive(Clone)]

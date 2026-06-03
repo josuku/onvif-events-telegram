@@ -22,3 +22,16 @@ Service is made using onvif-rs and a modified version of rustygram crate to perm
    $ git submodule update --init --recursive
    $ cargo run config.yaml
 ```
+
+
+
+TODOs
+
+- empty '/getsnapshot' return snapshot of every camera
+- add '/delete id' to delete cameras (to force readding when ip changes)
+- add '/addcamera uri' to add manually new cameras for if discovery fails (http://x.x.x.x:8899)
+- add logger 
+- add Dockerfile
+- add yolo to pipeline to detect persons-animals-objects
+- save detections in postgres and pictures in a folder (in future must have a cleanup process)
+- make a frontend to be able to check pictures with data, and search by date, camera or object

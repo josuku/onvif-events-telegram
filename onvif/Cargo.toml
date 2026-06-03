@@ -1,0 +1,21 @@
+[package]
+name = "onvif"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+onvif = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+onvif-xsd = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+recording = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+replay = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+search = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+schema = { git = "https://github.com/lumeohq/onvif-rs", rev = "1b1e6fd" }
+xsd-types = { git = "https://github.com/lumeohq/xsd-parser-rs", rev = "7f3d433" }
+
+anyhow = "1.0.86"
+chrono = "0.4.38"
+futures-util = "0.3.30"
+log = "0.4.22"
+network-interface = "2.0.0"
+url = "2.2.0"
+reqwest = "0.12.7"
