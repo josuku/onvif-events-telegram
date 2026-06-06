@@ -1,3 +1,7 @@
+pub mod domain;
+pub mod helpers;
+pub mod traits;
+
 pub type CameraId = i64;
 pub type SubscriptionId = i64;
 pub type ChatId = i64;

@@ -1,9 +1,7 @@
 extern crate onvif;
 
 use chrono::{NaiveDate, Utc};
-use futures_util::stream::StreamExt;
 use log::{debug, error, warn};
-use onvif::discovery::{self, Device};
 use onvif::soap::client::Client;
 use onvif::soap::{self, client::AuthType};
 use schema::devicemgmt::CreateUsers;
@@ -11,66 +9,10 @@ use schema::{self, transport};
 use std::collections::HashSet;
 use url::Url;
 
-use crate::network::get_primary_ipv4_address;
-
 pub const DEFAULT_USERNAME: &str = "oet1";
 pub const DEFAULT_PASSWORD: &str = "oet12345";
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub struct DiscoveryDevice {
-    /// The WS-Discovery UUID / address reference
-    pub address: String,
-    pub name: Option<String>,
-    pub urls: Vec<Url>,
-}
-
-pub async fn camera_discovery() -> Vec<DiscoveryDevice> {
-    // multicast discovery
-    let mut devices = discovery::DiscoveryBuilder::default()
-        .run()
-        .await
-        .unwrap()
-        .collect::<Vec<Device>>()
-        .await;
-
-    if devices.is_empty() {
-        println!("no devices discovery using multicast. trying with unicast");
-
-        let ipv4 = match get_primary_ipv4_address() {
-            Ok(ip) => ip,
-            Err(_) => return Vec::new(),
-        };
-
-        if let Some(netmask) = ipv4.netmask {
-            // try unicast discovery
-            devices = discovery::DiscoveryBuilder::default()
-                .discovery_mode(onvif::discovery::DiscoveryMode::Unicast {
-                    network: ipv4.ip,
-                    network_mask: netmask,
-                })
-                .run()
-                .await
-                .unwrap()
-                .collect::<Vec<Device>>()
-                .await;
-        }
-        if devices.is_empty() {
-            println!("no devices discovery using unicast");
-        }
-    }
-
-    devices
-        .iter()
-        .map(|device| DiscoveryDevice {
-            address: device.address.clone(),
-            name: device.name.clone(),
-            urls: device.urls.clone(),
-        })
-        .collect()
-}
-
-#[derive(Clone)]
-pub struct OnvifClients {
+pub struct OnvifServiceClients {
     pub devicemgmt: soap::client::Client,
     pub event: Option<soap::client::Client>,
     pub deviceio: Option<soap::client::Client>,
@@ -81,7 +23,7 @@ pub struct OnvifClients {
     pub analytics: Option<soap::client::Client>,
 }
 
-impl OnvifClients {
+impl OnvifServiceClients {
     pub async fn new(
         uri: &str,
         username: Option<&str>,

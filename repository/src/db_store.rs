@@ -1,5 +1,5 @@
 use anyhow::bail;
-use app_core::{CameraId, ChatId, SubscriptionId};
+use app_core::{CameraId, ChatId, SubscriptionId, domain::camera::CameraConnectionData};
 use log::error;
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -136,10 +136,8 @@ impl DbStore {
     pub fn insert_camera(
         &self,
         name: &str,
-        uri: &str,
         address: &str,
-        username: &str,
-        password: &str,
+        conn_data: &CameraConnectionData,
         snapshot_uri: &Option<String>,
     ) -> anyhow::Result<CameraId> {
         let connection = self.connection.lock().unwrap();
@@ -150,10 +148,10 @@ impl DbStore {
                     values (?1, ?2, ?3, ?4, ?5, ?6)",
                 [
                     name,
-                    uri,
+                    &conn_data.uri,
                     address,
-                    username,
-                    password,
+                    &conn_data.username,
+                    &conn_data.password,
                     snapshot_uri.as_str(),
                 ],
             ) {
@@ -162,7 +160,13 @@ impl DbStore {
         } else if let Err(err) = connection.execute(
             "INSERT INTO cameras (name, uri, address, username, password) 
                 values (?1, ?2, ?3, ?4, ?5)",
-            [name, uri, address, username, password],
+            [
+                name,
+                &conn_data.uri,
+                address,
+                &conn_data.username,
+                &conn_data.password,
+            ],
         ) {
             bail!("cannot insert camera: {}", err)
         }

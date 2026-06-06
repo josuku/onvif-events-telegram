@@ -28,7 +28,7 @@ Service is made using onvif-rs and a modified version of rustygram crate to perm
 TODOs
 
 - empty '/getsnapshot' return snapshot of every camera
-- add '/delete id' to delete cameras (to force readding when ip changes)
+- add '/delete id' to delete cameras (to force re-adding when ip changes)
 - add '/addcamera uri' to add manually new cameras for if discovery fails (http://x.x.x.x:8899)
 - add logger 
 - add Dockerfile

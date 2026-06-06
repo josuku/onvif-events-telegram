@@ -1,10 +1,7 @@
 use super::telegram_bot::TelegramBot;
-use app_core::{make_caption, CameraId};
+use app_core::{make_caption, traits::discovery_client::DiscoveryClient, CameraId};
 use log::{error, info};
-use onvif::{
-    create_onvif_user_and_fix_snapshot_uri, onvif_camera::download_picture,
-    onvif_clients::camera_discovery,
-};
+use onvif::onvif_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
 use teloxide::{
@@ -116,8 +113,11 @@ async fn get_cameras_cmd(
     repository: Arc<MemoryRepository>,
 ) -> ResponseResult<()> {
     info!("command GetCameras - chat_id:{}", chat_id);
+
+    let discovered_devices = OnvifDiscoveryClient::camera_discovery().await;
+
     if let Err(err) = repository
-        .update_repository_cameras(&camera_discovery().await)
+        .update_repository_cameras(&discovered_devices)
         .await
     {
         error!("cannot update cameras: {}", err);
@@ -225,33 +225,25 @@ async fn get_snapshot_cmd(
         }
     };
 
-    if let Some(snapshot_uri) = camera.snapshot_uri {
-        let snapshot = match download_picture(&snapshot_uri).await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                let error = format!(
-                    "error getting snapshot from url:{:?} err:{}",
-                    snapshot_uri, err
-                );
-                print_and_send_error(&bot, &error, chat_id).await;
-                return response_result_error(error);
-            }
-        };
-        _ = telegram_bot
-            .send_picture(
-                &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
-                snapshot.clone(),
-                chat_id.0,
-            )
-            .await;
-    } else {
-        print_and_send_error(
-            &bot,
-            &format!("no snapshot url specified for camera {}", camera.name),
-            chat_id,
+    let snapshot = match camera.client.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            let error = format!(
+                "error getting snapshot from camera:{:?} err:{}",
+                camera.name, err
+            );
+            print_and_send_error(&bot, &error, chat_id).await;
+            return response_result_error(error);
+        }
+    };
+
+    _ = telegram_bot
+        .send_picture(
+            &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
+            snapshot.clone(),
+            chat_id.0,
         )
         .await;
-    }
     Ok(())
 }
 
@@ -309,7 +301,14 @@ async fn fix_snapshot_uri_cmd(
     };
 
     if let Some(snapshot_uri) = camera.snapshot_uri {
-        match create_onvif_user_and_fix_snapshot_uri(&camera.client.uri, &snapshot_uri).await {
+        match camera
+            .client
+            .create_user_and_fix_snapshot_uri(
+                &camera.client.get_connection_data().uri,
+                &snapshot_uri,
+            )
+            .await
+        {
             Ok(fixed_uri) => {
                 match repository
                     .update_snapshot_uri_from_camera(camera_id, &fixed_uri)
@@ -334,7 +333,10 @@ async fn fix_snapshot_uri_cmd(
             }
         }
     } else {
-        let error = format!("camera {} does not have snapshot uri", camera.client.uri);
+        let error = format!(
+            "camera {} does not have snapshot uri",
+            camera.client.get_connection_data().uri
+        );
         print_and_send_error(&bot, &error, chat_id).await;
         return response_result_error(error);
     }

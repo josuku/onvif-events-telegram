@@ -2,8 +2,8 @@ mod config;
 
 use app_core::make_caption;
 use config::AppConfig;
-use log::{error, info, warn};
-use onvif::onvif_camera::{download_picture, is_new_detection};
+use log::{error, info};
+use onvif::onvif_camera_client::create_onvif_camera_client;
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
 use std::{process::exit, sync::Arc};
@@ -76,12 +76,33 @@ async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRep
 async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
     let now = chrono::Utc::now();
 
-    for mut camera in repository.get_cameras().await {
+    for camera in repository.get_cameras().await {
         let msg = match camera.client.get_event_message().await {
             Ok(msg) => msg,
             Err(err) => {
-                warn!("error getting pull message: {}", err);
-                return;
+                error!("error getting pull message. error:{}", err);
+                let conn_data = camera.client.get_connection_data();
+                match create_onvif_camera_client(
+                    &conn_data.uri,
+                    &conn_data.username,
+                    &conn_data.password,
+                )
+                .await
+                {
+                    Ok(client) => {
+                        if let Err(err) = repository
+                            .replace_camera_client(camera.id, Arc::new(client))
+                            .await
+                        {
+                            error!("cannot replace camera client in repository. error:{}", err);
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        error!("cannot create onvif camera client. error:{}", err);
+                        continue;
+                    }
+                };
             }
         };
 
@@ -89,33 +110,29 @@ async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<Me
             .update_last_polling_from_camera(camera.id, now)
             .await;
 
-        if is_new_detection(&msg) {
-            if let Some(snapshot_uri) = &camera.snapshot_uri {
-                let snapshot = match download_picture(snapshot_uri).await {
-                    Ok(snapshot) => snapshot,
-                    Err(err) => {
-                        error!("error getting snapshot: {}", err);
-                        return;
-                    }
-                };
-                telegram_bot
-                    .send_notification(
-                        make_caption(
-                            "New Detection",
-                            &camera.name,
-                            &msg.current_time.value.to_utc(),
-                        ),
-                        snapshot.clone(),
-                        camera.subscriptors.clone(),
-                        camera.id,
-                    )
-                    .await;
+        let snapshot = match camera.client.snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                error!(
+                    "error getting snapshot from camera:{}. error:{}",
+                    camera.name, err
+                );
+                continue;
             }
-            println!(
-                "{} - new detection in camera:{}",
-                msg.current_time, camera.name
-            );
-        }
+        };
+        telegram_bot
+            .send_notification(
+                make_caption("New Detection", &camera.name, &msg.timestamp),
+                snapshot.clone(),
+                camera.subscriptors.clone(),
+                camera.id,
+            )
+            .await;
+
+        println!(
+            "{} - new detection in camera:{}",
+            msg.timestamp, camera.name
+        );
     }
 }
 

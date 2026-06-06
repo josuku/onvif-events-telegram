@@ -1,25 +1,26 @@
 use anyhow::bail;
-use app_core::{CameraId, ChatId};
+use app_core::{CameraId, ChatId, domain::discovery_device::DiscoveryDevice};
 use chrono::Utc;
 use log::error;
-use onvif::{onvif_camera::OnvifCamera, onvif_clients::DiscoveryDevice};
+use onvif::onvif_camera_client::create_onvif_camera_client;
 use std::{collections::HashMap, fmt, sync::Arc};
 // use teloxide::types::ChatId;
 use tokio::sync::Mutex;
 use url::Url;
 
 use super::db_store::DbStore;
+use app_core::traits::camera_client::CameraClient;
 
 #[derive(Clone)]
-pub struct Camera {
+pub struct CameraData {
     pub id: CameraId,
     pub name: String,
     pub address: String,
     pub snapshot_uri: Option<String>,
-    pub client: OnvifCamera,
+    pub client: Arc<dyn CameraClient>,
     pub subscriptors: Vec<ChatId>,
 }
-impl fmt::Display for Camera {
+impl fmt::Display for CameraData {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -32,7 +33,7 @@ Camera {}
 - Subscriptors: {}"#,
             self.id,
             self.name,
-            self.client.uri,
+            self.client.get_connection_data().uri,
             self.address,
             self.snapshot_uri.clone().unwrap_or_default(),
             self.subscriptors.len(),
@@ -41,7 +42,7 @@ Camera {}
 }
 
 pub struct MemoryRepository {
-    cameras: Mutex<HashMap<CameraId, Camera>>,
+    cameras: Mutex<HashMap<CameraId, CameraData>>,
     polling_seconds: Mutex<u64>,
     between_seconds: Mutex<u64>,
     repo_store: Arc<DbStore>,
@@ -51,6 +52,7 @@ pub struct MemoryRepository {
     daily_report_subscriptors: Mutex<Vec<ChatId>>,
     last_polling: Mutex<HashMap<CameraId, chrono::DateTime<Utc>>>,
 }
+
 impl MemoryRepository {
     pub fn new(polling_seconds: u64, between_seconds: u64, repo_store: Arc<DbStore>) -> Self {
         Self {
@@ -75,21 +77,17 @@ impl MemoryRepository {
         };
 
         for camera in cameras {
-            let mut client =
-                match OnvifCamera::new(&camera.uri, &camera.username, &camera.password).await {
-                    Ok(cli) => cli,
-                    Err(err) => {
-                        anyhow::bail!("cannot create OnvifCamera:{}", err);
-                    }
-                };
-            client.init().await;
+            let client =
+                create_onvif_camera_client(&camera.uri, &camera.username, &camera.password)
+                    .await
+                    .map_err(|err| anyhow::anyhow!({ err }))?;
 
-            self.add_camera(Camera {
+            self.add_camera(CameraData {
                 id: camera.id,
                 name: camera.name,
                 address: camera.address,
                 snapshot_uri: camera.snapshot_uri,
-                client,
+                client: Arc::new(client),
                 subscriptors: Vec::new(),
             })
             .await?;
@@ -115,19 +113,19 @@ impl MemoryRepository {
         Ok(())
     }
 
-    pub async fn get_cameras(&self) -> Vec<Camera> {
+    pub async fn get_cameras(&self) -> Vec<CameraData> {
         let cameras = self.cameras.lock().await;
         cameras.values().cloned().collect()
     }
 
-    pub async fn get_sorted_cameras(&self) -> Vec<Camera> {
+    pub async fn get_sorted_cameras(&self) -> Vec<CameraData> {
         let cameras = self.cameras.lock().await;
-        let mut vec: Vec<(i64, Camera)> = cameras.clone().into_iter().collect();
+        let mut vec: Vec<(i64, CameraData)> = cameras.clone().into_iter().collect();
         vec.sort_by_key(|a| a.0);
         vec.into_iter().map(|(_, camera)| camera).collect()
     }
 
-    pub async fn get_camera(&self, camera_id: CameraId) -> Option<Camera> {
+    pub async fn get_camera(&self, camera_id: CameraId) -> Option<CameraData> {
         let cameras = self.cameras.lock().await;
         cameras.get(&camera_id).cloned()
     }
@@ -204,7 +202,7 @@ impl MemoryRepository {
         last_polling.insert(camera_id, now);
     }
 
-    pub async fn add_camera(&self, mut camera: Camera) -> anyhow::Result<()> {
+    pub async fn add_camera(&self, mut camera: CameraData) -> anyhow::Result<()> {
         let mut cameras = self.cameras.lock().await;
         for (_, cam) in cameras.iter() {
             if camera.id == cam.id || camera.address == cam.address {
@@ -215,10 +213,8 @@ impl MemoryRepository {
         camera.id = if camera.id == 0 {
             match self.repo_store.insert_camera(
                 &camera.name,
-                &camera.client.uri,
                 &camera.address,
-                &camera.client.credentials.username,
-                &camera.client.credentials.password,
+                &camera.client.get_connection_data(),
                 &camera.snapshot_uri,
             ) {
                 Ok(id) => id,
@@ -311,10 +307,31 @@ impl MemoryRepository {
         let mut cameras = self.cameras.lock().await;
         match cameras.get_mut(&camera_id) {
             Some(camera) => {
-                camera.client.uri = uri.to_string();
-                self.repo_store.update_uri_from_camera(camera_id, uri);
+                let client = create_onvif_camera_client(
+                    uri,
+                    &camera.client.get_connection_data().username,
+                    &camera.client.get_connection_data().password,
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!({ err }))?;
+                camera.client = Arc::new(client);
             }
-            None => bail!("cannot find camera {}", camera_id),
+            None => bail!("cannot find camera {} to replace uri", camera_id),
+        }
+        Ok(())
+    }
+
+    pub async fn replace_camera_client(
+        &self,
+        camera_id: CameraId,
+        camera_client: Arc<dyn CameraClient>,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.client = camera_client;
+            }
+            None => bail!("cannot find camera {} to replace camera client", camera_id),
         }
         Ok(())
     }
@@ -353,27 +370,21 @@ impl MemoryRepository {
                     uri = make_uri(url);
                 }
 
-                let mut client = match OnvifCamera::new(
-                    &uri, "", "", // TODO user-pass empty by default
-                )
-                .await
-                {
-                    Ok(cli) => cli,
-                    Err(err) => {
-                        bail!("cannot create OnvifCamera:{}", err);
-                    }
-                };
-                client.init().await;
+                // TODO user-pass empty by default
+                let client = create_onvif_camera_client(&uri, "", "")
+                    .await
+                    .map_err(|err| anyhow::anyhow!({ err }))?;
 
+                // TODO remove and keep only in memory??
                 let snapshot_uri = client.get_snapshot_uri().await.ok();
 
                 if let Err(err) = self
-                    .add_camera(Camera {
+                    .add_camera(CameraData {
                         id: 0, // new camera, insert into store
                         name: new_device.name.clone().unwrap_or_default(),
                         address: new_device.address.clone(),
                         snapshot_uri,
-                        client,
+                        client: Arc::new(client),
                         subscriptors: Vec::new(),
                     })
                     .await
@@ -386,10 +397,11 @@ impl MemoryRepository {
                 && let Some(new_url) = new_device.urls.first()
             {
                 let new_uri = make_uri(new_url);
-                if camera.client.uri != new_uri {
+                let prev_conn_data = camera.client.get_connection_data();
+                if prev_conn_data.uri != new_uri {
                     println!(
                         "Updating host of camera:{} -> prev:{} new:{}",
-                        camera.id, camera.client.uri, new_url
+                        camera.id, prev_conn_data.uri, new_url
                     );
                     let _ = self.update_uri_from_camera(camera.id, &new_uri).await;
 
