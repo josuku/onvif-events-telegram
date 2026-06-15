@@ -2663,6 +2663,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "app-core",
+ "async-trait",
  "chrono",
  "log",
  "onvif 0.1.0",

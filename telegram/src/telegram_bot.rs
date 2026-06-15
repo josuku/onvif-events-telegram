@@ -1,16 +1,12 @@
 use super::bot_command::{command_handler, BotCommand};
-use anyhow::bail;
-use app_core::{CameraId, ChatId};
+use app_core::traits::notifier::Notifier;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
-// use teloxide::{prelude::*, types::InputFile, Bot};
 use teloxide::{
     dispatching::Dispatcher,
     dispatching::{HandlerExt, UpdateFilterExt},
     dptree,
-    payloads::SendPhotoSetters,
-    prelude::Requester,
-    types::{InputFile, Update},
+    types::Update,
     Bot,
 };
 
@@ -19,6 +15,7 @@ pub struct TelegramBot {
     client: Bot,
     allowed_chat_ids: Vec<String>,
     repository: Arc<MemoryRepository>,
+    notifier: Arc<dyn Notifier>,
 }
 
 impl TelegramBot {
@@ -26,11 +23,13 @@ impl TelegramBot {
         bot_token: String,
         chat_ids: Vec<String>,
         repository: Arc<MemoryRepository>,
+        notifier: Arc<dyn Notifier>,
     ) -> Self {
         Self {
             client: Bot::new(bot_token),
             allowed_chat_ids: chat_ids,
             repository,
+            notifier,
         }
     }
 
@@ -45,70 +44,11 @@ impl TelegramBot {
             .dependencies(dptree::deps![
                 self.allowed_chat_ids.clone(),
                 self.repository.clone(),
+                self.notifier.clone(),
                 self.clone()
             ])
             .build()
             .dispatch()
             .await;
-    }
-
-    pub async fn send_notification(
-        &self,
-        message: String,
-        picture: Vec<u8>,
-        chat_ids: Vec<ChatId>,
-        camera_id: CameraId,
-    ) {
-        for chat_id in chat_ids {
-            let last_notification_time = self
-                .repository
-                .get_last_notification_time(camera_id, chat_id)
-                .await;
-            let between_seconds = self.repository.get_between_seconds().await;
-
-            if last_notification_time.is_none()
-                || chrono::Utc::now().timestamp() - last_notification_time.unwrap().timestamp()
-                    > between_seconds.try_into().unwrap()
-            {
-                if let Ok(()) = self.send_picture(&message, picture.clone(), chat_id).await {
-                    self.repository
-                        .update_last_notification_time(camera_id, chat_id)
-                        .await;
-                }
-            } else {
-                println!(
-                    "skipping notification of camera {} to chatId {}",
-                    camera_id, chat_id
-                );
-            }
-        }
-    }
-
-    pub async fn send_picture(
-        &self,
-        message: &str,
-        picture: Vec<u8>,
-        chat_id: ChatId,
-    ) -> anyhow::Result<()> {
-        let file = InputFile::memory(picture.clone()).file_name("new_file.jpg");
-
-        if let Err(err) = self
-            .client
-            .send_photo(teloxide::prelude::ChatId(chat_id), file)
-            .caption(message)
-            .await
-        {
-            bail!("cannot send picture to Telegram {:?}", err)
-        }
-        Ok(())
-    }
-
-    pub async fn send_message(&self, message: String, chat_ids: Vec<ChatId>) {
-        for chat_id in chat_ids {
-            let _ = self
-                .client
-                .send_message(teloxide::prelude::ChatId(chat_id), message.clone())
-                .await;
-        }
     }
 }

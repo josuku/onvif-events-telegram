@@ -1,4 +1,4 @@
-use super::telegram_bot::TelegramBot;
+use app_core::traits::notifier::Notifier;
 use app_core::{make_caption, traits::discovery_client::DiscoveryClient, CameraId};
 use log::{error, info};
 use onvif::onvif_discovery_client::OnvifDiscoveryClient;
@@ -47,7 +47,7 @@ pub async fn command_handler(
     msg: Message,
     allowed_chat_ids: Vec<String>,
     repository: Arc<MemoryRepository>,
-    telegram_bot: TelegramBot,
+    notifier: Arc<dyn Notifier>,
     cmd: BotCommand,
 ) -> ResponseResult<()> {
     if !allowed_chat_ids.contains(&format!("{}", msg.chat.id)) {
@@ -82,7 +82,7 @@ pub async fn command_handler(
             unsubscribe_cmd(bot, msg.chat.id, repository, camera_id).await?
         }
         BotCommand::GetSnapshot(camera_id) => {
-            get_snapshot_cmd(bot, msg.chat.id, repository, telegram_bot, camera_id).await?
+            get_snapshot_cmd(bot, msg.chat.id, repository, notifier, camera_id).await?
         }
         BotCommand::SetPollingTime(seconds) => {
             set_polling_time_cmd(bot, msg.chat.id, repository, seconds).await?
@@ -209,7 +209,7 @@ async fn get_snapshot_cmd(
     bot: Bot,
     chat_id: ChatId,
     repository: Arc<MemoryRepository>,
-    telegram_bot: TelegramBot,
+    notifier: Arc<dyn Notifier>,
     camera_id: CameraId,
 ) -> ResponseResult<()> {
     info!(
@@ -237,8 +237,8 @@ async fn get_snapshot_cmd(
         }
     };
 
-    _ = telegram_bot
-        .send_picture(
+    _ = notifier
+        .send_picture_message(
             &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
             snapshot.clone(),
             chat_id.0,

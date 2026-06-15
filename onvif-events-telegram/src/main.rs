@@ -1,13 +1,13 @@
 mod config;
 
-use app_core::make_caption;
+use app_core::{make_caption, traits::notifier::Notifier};
 use config::AppConfig;
 use log::{error, info};
 use onvif::onvif_camera_client::create_onvif_camera_client;
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
 use std::{process::exit, sync::Arc};
-use telegram::telegram_bot::TelegramBot;
+use telegram::{telegram_bot::TelegramBot, telegram_notifier::TelegramNotifier};
 use tokio::{select, signal};
 
 const DEFAULT_POLLING_SECONDS: u64 = 1;
@@ -31,15 +31,21 @@ async fn main() {
         .await
         .expect("cannot load from store");
 
+    let notifier: Arc<dyn Notifier> = Arc::new(TelegramNotifier::new(
+        config.telegram.bot_token.clone(),
+        repository.clone(),
+    ));
+
     let telegram_bot = Arc::new(TelegramBot::new(
         config.telegram.bot_token.clone(),
         config.telegram.user_ids.clone(),
         repository.clone(),
+        notifier.clone(),
     ));
 
     select! {
-        _ = start_bot(telegram_bot.clone()) => (),
-        _ = start_polling(telegram_bot, repository) => (),
+        _ = start_bot(telegram_bot) => (),
+        _ = start_polling(notifier, repository) => (),
         _ = signal::ctrl_c() => info!("Closing app"),
     }
 }
@@ -58,11 +64,11 @@ async fn start_bot(telegram_bot: Arc<TelegramBot>) {
     telegram_bot.start().await;
 }
 
-async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
+async fn start_polling(notifier: Arc<dyn Notifier>, repository: Arc<MemoryRepository>) {
     let mut last_polling = chrono::Local::now();
     loop {
-        check_for_detections(telegram_bot.clone(), repository.clone()).await;
-        manage_daily_report(telegram_bot.clone(), repository.clone(), last_polling).await;
+        check_for_detections_in_cameras(notifier.clone(), repository.clone()).await;
+        manage_daily_report(notifier.clone(), repository.clone(), last_polling).await;
 
         last_polling = chrono::Local::now();
 
@@ -73,7 +79,10 @@ async fn start_polling(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRep
     }
 }
 
-async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<MemoryRepository>) {
+async fn check_for_detections_in_cameras(
+    notifier: Arc<dyn Notifier>,
+    repository: Arc<MemoryRepository>,
+) {
     let now = chrono::Utc::now();
 
     for camera in repository.get_cameras().await {
@@ -120,8 +129,9 @@ async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<Me
                 continue;
             }
         };
-        telegram_bot
-            .send_notification(
+
+        notifier
+            .send_text_with_picture_message(
                 make_caption("New Detection", &camera.name, &msg.timestamp),
                 snapshot.clone(),
                 camera.subscriptors.clone(),
@@ -137,7 +147,7 @@ async fn check_for_detections(telegram_bot: Arc<TelegramBot>, repository: Arc<Me
 }
 
 async fn manage_daily_report(
-    telegram_bot: Arc<TelegramBot>,
+    notifier: Arc<dyn Notifier>,
     repository: Arc<MemoryRepository>,
     last_polling: chrono::DateTime<chrono::Local>,
 ) {
@@ -172,7 +182,7 @@ async fn manage_daily_report(
             ));
         }
 
-        telegram_bot.send_message(report, chat_ids).await;
+        notifier.send_text_message(report, chat_ids).await;
 
         repository.clear_today_notifications().await;
     }
