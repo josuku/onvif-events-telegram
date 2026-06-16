@@ -87,7 +87,10 @@ async fn check_for_detections_in_cameras(
 
     for camera in repository.get_cameras().await {
         let msg = match camera.client.get_event_message().await {
-            Ok(msg) => msg,
+            Ok(msg) => match msg {
+                Some(msg) => msg,
+                None => continue,
+            },
             Err(err) => {
                 error!("error getting pull message. error:{}", err);
                 let conn_data = camera.client.get_connection_data();

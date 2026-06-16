@@ -1,7 +1,7 @@
 use anyhow::bail;
 use app_core::{CameraId, ChatId, domain::discovery_device::DiscoveryDevice};
 use chrono::Utc;
-use log::error;
+use log::{error, info};
 use onvif::onvif_camera_client::create_onvif_camera_client;
 use std::{collections::HashMap, fmt, sync::Arc};
 // use teloxide::types::ChatId;
@@ -371,12 +371,22 @@ impl MemoryRepository {
                 }
 
                 // TODO user-pass empty by default
-                let client = create_onvif_camera_client(&uri, "", "")
+                let mut client = create_onvif_camera_client(&uri, "", "")
                     .await
                     .map_err(|err| anyhow::anyhow!({ err }))?;
 
-                // TODO remove and keep only in memory??
                 let snapshot_uri = client.get_snapshot_uri().await.ok();
+
+                if let Some((user, password)) = extract_credentials(snapshot_uri.clone()) {
+                    info!(
+                        "Using user and password extracted from snapshot uri:{:?}",
+                        snapshot_uri
+                    );
+
+                    client = create_onvif_camera_client(&uri, &user, &password)
+                        .await
+                        .map_err(|err| anyhow::anyhow!({ err }))?;
+                }
 
                 if let Err(err) = self
                     .add_camera(CameraData {
@@ -451,4 +461,23 @@ fn make_uri(url: &Url) -> String {
         url.host_str().unwrap_or_default(),
         url.port().unwrap_or_default(),
     )
+}
+
+fn extract_credentials(input: Option<String>) -> Option<(String, String)> {
+    if let Some(input) = input {
+        let url = Url::parse(&input).ok()?;
+
+        let user = url
+            .query_pairs()
+            .find(|(k, _)| k == "user")
+            .map(|(_, v)| v.to_string())?;
+
+        let password = url
+            .query_pairs()
+            .find(|(k, _)| k == "password")
+            .map(|(_, v)| v.to_string())?;
+
+        return Some((user, password));
+    }
+    None
 }

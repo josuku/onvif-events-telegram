@@ -1,7 +1,7 @@
 extern crate onvif;
 
 use chrono::{NaiveDate, Utc};
-use log::{debug, error, warn};
+use log::{debug, error};
 use onvif::soap::client::Client;
 use onvif::soap::{self, client::AuthType};
 use schema::devicemgmt::CreateUsers;
@@ -37,7 +37,6 @@ impl OnvifServiceClients {
             (None, None) => None,
             _ => panic!("username and password must be specified together"),
         };
-        warn!("new OnvifClients. uri:{}", uri);
         let base_uri: Url = Url::parse(uri).unwrap();
         let devicemgmt_uri = base_uri.join("/onvif/device_service").unwrap();
         let auth_type = AuthType::Any;
@@ -188,8 +187,8 @@ pub async fn get_snapshot_uris(media_client: &Client) -> Result<Vec<String>, tra
     )
     .await?;
     for (p, resp) in profiles.profiles.iter().zip(responses.iter()) {
-        println!("token={} name={}", &p.token.0, &p.name.0);
-        println!("    snapshot_uri={}", &resp.media_uri.uri);
+        debug!("token={} name={}", &p.token.0, &p.name.0);
+        debug!("    snapshot_uri={}", &resp.media_uri.uri);
         uris.push(resp.media_uri.uri.clone());
     }
 

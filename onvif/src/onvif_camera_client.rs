@@ -92,7 +92,8 @@ impl CameraClient for OnvifCameraClient {
                         for snapshot_uri in snapshot_uris {
                             match download_picture_from_uri(&snapshot_uri).await {
                                 Ok(_) => return Ok(snapshot_uri),
-                                Err(_) => {
+                                Err(err) => {
+                                    error!("cannot download picture from uri. trying to create new onvif user. error:{}", err);
                                     // if onvif uri doesnt work, create new user, replace credentials and try again
                                     match self
                                         .create_user_and_fix_snapshot_uri(
@@ -127,7 +128,7 @@ impl CameraClient for OnvifCameraClient {
         )
     }
 
-    async fn get_event_message(&self) -> anyhow::Result<CameraEvent> {
+    async fn get_event_message(&self) -> anyhow::Result<Option<CameraEvent>> {
         if let Some(client) = &self.event_subscription {
             let request = PullMessages {
                 message_limit: 256,
@@ -142,10 +143,12 @@ impl CameraClient for OnvifCameraClient {
             match pull_messages_response {
                 Ok(msg) => {
                     if is_motion_detection(&msg) {
-                        return Ok(CameraEvent {
+                        return Ok(Some(CameraEvent {
                             r#type: app_core::domain::camera::CameraEventType::Motion,
                             timestamp: msg.current_time.value.to_utc(),
-                        });
+                        }));
+                    } else {
+                        return Ok(None);
                     }
                 }
                 Err(err) => {
@@ -157,7 +160,6 @@ impl CameraClient for OnvifCameraClient {
             // self.init().await;
             bail!("no event subscription to get event message");
         }
-        bail!("client not registered");
     }
 
     fn connected(&self) -> bool {
@@ -201,7 +203,12 @@ pub async fn create_onvif_camera_client(
     let mut client = match OnvifCameraClient::new(uri, username, password).await {
         Ok(cli) => cli,
         Err(err) => {
-            bail!("cannot create OnvifCamera:{}", err);
+            bail!(
+                "cannot create OnvifCamera in url:{} with user:{}. error:{}",
+                uri,
+                username,
+                err
+            );
         }
     };
     client.init().await;
