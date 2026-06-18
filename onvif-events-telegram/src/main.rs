@@ -1,6 +1,11 @@
+mod app_command_processor;
 mod config;
 
-use app_core::{make_caption, traits::notifier::Notifier};
+use crate::app_command_processor::AppCommandProcessor;
+use app_core::{
+    make_caption,
+    traits::{command_processor::CommandProcessor, notifier::Notifier},
+};
 use config::AppConfig;
 use log::{error, info};
 use onvif::onvif_camera_client::create_onvif_camera_client;
@@ -36,11 +41,15 @@ async fn main() {
         repository.clone(),
     ));
 
+    let app_command_processor: Arc<dyn CommandProcessor> = Arc::new(AppCommandProcessor::new(
+        repository.clone(),
+        notifier.clone(),
+    ));
+
     let telegram_bot = Arc::new(TelegramBot::new(
         config.telegram.bot_token.clone(),
         config.telegram.user_ids.clone(),
-        repository.clone(),
-        notifier.clone(),
+        app_command_processor,
     ));
 
     select! {
