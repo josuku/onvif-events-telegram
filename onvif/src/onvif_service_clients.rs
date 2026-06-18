@@ -1,12 +1,12 @@
 extern crate onvif;
 
 use chrono::{NaiveDate, Utc};
-use log::{debug, error};
 use onvif::soap::client::Client;
 use onvif::soap::{self, client::AuthType};
 use schema::devicemgmt::CreateUsers;
 use schema::{self, transport};
 use std::collections::HashSet;
+use tracing::{debug, error, warn};
 use url::Url;
 
 pub const DEFAULT_USERNAME: &str = "oet1";
@@ -75,7 +75,7 @@ impl OnvifServiceClients {
             }
             Some(diff)
         } else {
-            println!("GetSystemDateAndTimeResponse doesn't have utc_data_time value!");
+            warn!("GetSystemDateAndTimeResponse doesn't have utc_data_time value!");
             None
         };
 
@@ -163,7 +163,7 @@ pub async fn create_default_user(camera_uri: &str) -> Result<(), transport::Erro
 
     let users: schema::devicemgmt::GetUsersResponse =
         schema::devicemgmt::get_users(&devicemgmt, &Default::default()).await?;
-    println!("users after creation: {:?}", users);
+    debug!("users after creation: {:?}", users);
 
     Ok(())
 }
@@ -202,7 +202,7 @@ pub async fn get_snapshot_uris(media_client: &Client) -> Result<Vec<String>, tra
 // async fn get_hostname(clients: &OnvifClients) -> Result<(), transport::Error> {
 //     let resp = schema::devicemgmt::get_hostname(&clients.devicemgmt, &Default::default()).await?;
 //     debug!("get_hostname response: {:#?}", &resp);
-//     println!(
+//     debug!(
 //         "{}",
 //         resp.hostname_information
 //             .name

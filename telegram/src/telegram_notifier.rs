@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
 use teloxide::{payloads::SendPhotoSetters, prelude::Requester, types::InputFile, Bot};
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct TelegramNotifier {
@@ -77,7 +78,7 @@ impl Notifier for TelegramNotifier {
                         .await;
                 }
             } else {
-                println!(
+                warn!(
                     "skipping notification of camera {} to chatId {}",
                     camera_id, chat_id
                 );

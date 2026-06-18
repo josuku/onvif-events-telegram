@@ -1,10 +1,8 @@
 use anyhow::bail;
 use app_core::{CameraId, ChatId, SubscriptionId, domain::camera::CameraConnectionData};
-use log::error;
 use rusqlite::Connection;
 use std::sync::Mutex;
-// use crate::memory_repository::ChatId;
-// use teloxide::types::ChatId;
+use tracing::{error, info};
 
 pub struct DbCamera {
     pub id: CameraId,
@@ -124,7 +122,7 @@ impl DbStore {
             }
         }
         cameras.iter().for_each(|cam| {
-            println!(
+            info!(
                 "found camera id:{} name:{} subscriptors:{:?}",
                 cam.id, cam.name, cam.subscriptors
             )

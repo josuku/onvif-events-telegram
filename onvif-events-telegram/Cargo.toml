@@ -8,13 +8,13 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.86"
 async-trait = "0.1.89"
-tokio = { version = "1", features = ["full"] }
-serde_yaml = "0.9.34"
-fern = "0.7.1"
-log = "0.4.22"
-serde = "1.0.207"
-pretty_env_logger = "0.5.0"
 chrono = "0.4.38"
+serde = "1.0.207"
+serde_yaml = "0.9.34"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 app-core = { path = "../app-core" }
 onvif = { path = "../onvif" }

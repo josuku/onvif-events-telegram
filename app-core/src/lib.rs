@@ -1,3 +1,5 @@
+use tracing::debug;
+
 pub mod domain;
 pub mod helpers;
 pub mod traits;
@@ -8,7 +10,7 @@ pub type ChatId = i64;
 
 pub fn make_caption(title: &str, name: &str, time: &chrono::DateTime<chrono::Utc>) -> String {
     let converted: chrono::DateTime<chrono::Local> = chrono::DateTime::from(*time);
-    // println!("utc:{} local:{}", time, converted);
+    debug!("utc:{} local:{}", time, converted);
     format!(
         r#"
 {}

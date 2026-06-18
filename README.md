@@ -30,7 +30,6 @@ TODOs
 - empty '/getsnapshot' return snapshot of every camera
 - add '/delete id' to delete cameras (to force re-adding when ip changes)
 - add '/addcamera uri' to add manually new cameras for if discovery fails (http://x.x.x.x:8899)
-- add logger to a file
 - add Dockerfile (check if existing is valid)
 - add yolo to pipeline to detect persons-animals-objects
 - save detections in postgres and pictures in a folder (in future must have a cleanup process)

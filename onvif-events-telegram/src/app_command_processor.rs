@@ -5,10 +5,10 @@ use app_core::{
     CameraId, ChatId,
 };
 use async_trait::async_trait;
-use log::{error, info};
 use onvif::onvif_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
+use tracing::{error, info};
 
 pub struct AppCommandProcessor {
     repository: Arc<MemoryRepository>,
@@ -257,7 +257,7 @@ impl CommandProcessor for AppCommandProcessor {
                     {
                         Ok(_) => {
                             let message = format!("camera snapshot uri fixed:{}", fixed_uri);
-                            println!("{}", message);
+                            info!("{}", message);
                             let _ = self
                                 .notifier
                                 .send_text_message(message, vec![chat_id])

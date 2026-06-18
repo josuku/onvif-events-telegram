@@ -7,8 +7,8 @@ edition = "2021"
 anyhow = "1.0.86"
 async-trait = "0.1.89"
 chrono = "0.4.38"
-log = "0.4.22"
 teloxide = { version = "0.13", features = ["macros"] }
+tracing = "0.1"
 
 app-core = { path = "../app-core" }
 onvif = { path = "../onvif" }

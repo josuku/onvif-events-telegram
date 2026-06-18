@@ -4,9 +4,9 @@ use app_core::{
 };
 use async_trait::async_trait;
 use futures_util::stream::StreamExt;
-use log::{info, warn};
 use onvif::discovery::{self, Device};
 use std::net::IpAddr;
+use tracing::{info, warn};
 
 pub struct OnvifDiscoveryClient {}
 

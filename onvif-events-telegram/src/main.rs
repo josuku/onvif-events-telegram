@@ -7,22 +7,27 @@ use app_core::{
     traits::{command_processor::CommandProcessor, notifier::Notifier},
 };
 use config::AppConfig;
-use log::{error, info};
 use onvif::onvif_camera_client::create_onvif_camera_client;
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
+use std::fs::OpenOptions;
 use std::{process::exit, sync::Arc};
 use telegram::{telegram_bot::TelegramBot, telegram_notifier::TelegramNotifier};
 use tokio::{select, signal};
+use tracing::{error, info};
+use tracing_appender::non_blocking;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const DEFAULT_POLLING_SECONDS: u64 = 1;
 const DEFAULT_BETWEEN_SECONDS: u64 = 15;
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    let _logging_guard = init_logging().expect("cannot initialize guard");
 
     let config = read_config();
+
+    info!("START Application with config {:?}", config);
 
     let repo_store = Arc::new(DbStore::new());
     repo_store.create_tables();
@@ -151,7 +156,7 @@ async fn check_for_detections_in_cameras(
             )
             .await;
 
-        println!(
+        info!(
             "{} - new detection in camera:{}",
             msg.timestamp, camera.name
         );
@@ -166,7 +171,7 @@ async fn manage_daily_report(
     let now = chrono::Local::now();
     let chat_ids = repository.get_daily_report_subscriptors().await;
     if !chat_ids.is_empty() && last_polling.date_naive() != now.date_naive() {
-        println!("Sending daily report: {}", now.format("%Y-%m-%d %H:%M:%S"));
+        info!("Sending daily report: {}", now.format("%Y-%m-%d %H:%M:%S"));
 
         let mut report = String::new();
         report.push_str(&format!("Daily report {}\n", last_polling.date_naive()));
@@ -212,4 +217,86 @@ fn time_ago(to: chrono::DateTime<chrono::Utc>, from: chrono::DateTime<chrono::Ut
     } else {
         format!("{} days ago", duration.num_days())
     }
+}
+
+// fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+//     std::fs::create_dir_all("logs")?;
+
+//     // Daily rotation version:
+//     // let file_appender = tracing_appender::rolling::daily("logs", "onvif-events.log");
+
+//     let log_file = OpenOptions::new()
+//         .create(true)
+//         .append(true)
+//         .open("logs/onvif-events.log")?;
+
+//     let (writer, guard) = non_blocking(log_file);
+
+//     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+//     let console_layer = fmt::layer()
+//         .with_target(false)
+//         .with_file(true)
+//         .with_line_number(true)
+//         .with_thread_ids(false)
+//         .with_ansi(true);
+
+//     // let file_layer = fmt::layer()
+//     //     .with_writer(writer)
+//     //     .with_target(false)
+//     //     .with_file(true)
+//     //     .with_line_number(true)
+//     //     .with_thread_ids(false)
+//     //     .with_ansi(false);
+
+//     let file_layer = fmt::layer()
+//         .with_writer(writer)
+//         .with_ansi(false)
+//         .compact();
+
+//     tracing_subscriber::registry()
+//         .with(filter)
+//         .with(console_layer)
+//         .with(file_layer)
+//         .init();
+
+//     Ok(guard)
+// }
+
+pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+    std::fs::create_dir_all("logs")?;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("logs/onvif-events.log")?;
+
+    let (writer, guard) = non_blocking(file);
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let console_layer = fmt::layer()
+        .pretty()
+        .with_writer(std::io::stdout)
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(false)
+        .with_ansi(true);
+
+    let file_layer = fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(false)
+        .with_file(true)
+        .with_line_number(true);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    tracing::info!("logging initialized");
+
+    Ok(guard)
 }

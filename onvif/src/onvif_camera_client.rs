@@ -8,12 +8,12 @@ use app_core::{
     traits::camera_client::CameraClient,
 };
 use async_trait::async_trait;
-use log::error;
 use onvif::soap::client::{Client as SoapClient, ClientBuilder};
 use schema::{
     b_2::NotificationMessageHolderType,
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
 };
+use tracing::error;
 use url::Url;
 
 pub struct OnvifCameraClient {
@@ -247,7 +247,7 @@ async fn create_event_pull_message_client(event_client: &SoapClient) -> anyhow::
         }
     };
 
-    // println!(
+    // debug!(
     //     "camera pull point subscription termination: {:?}",
     //     camera_sub.termination_time
     // );

@@ -1,5 +1,4 @@
 use app_core::{traits::command_processor::CommandProcessor, CameraId};
-use log::error;
 use std::sync::Arc;
 use teloxide::{
     dispatching::{Dispatcher, HandlerExt, UpdateFilterExt},
@@ -8,6 +7,7 @@ use teloxide::{
     utils::command::BotCommands,
     Bot,
 };
+use tracing::error;
 
 #[derive(BotCommands, Clone)]
 #[command(

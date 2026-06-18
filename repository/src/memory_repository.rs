@@ -1,11 +1,10 @@
 use anyhow::bail;
 use app_core::{CameraId, ChatId, domain::discovery_device::DiscoveryDevice};
 use chrono::Utc;
-use log::{error, info};
 use onvif::onvif_camera_client::create_onvif_camera_client;
 use std::{collections::HashMap, fmt, sync::Arc};
-// use teloxide::types::ChatId;
 use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 use url::Url;
 
 use super::db_store::DbStore;
@@ -409,7 +408,7 @@ impl MemoryRepository {
                 let new_uri = make_uri(new_url);
                 let prev_conn_data = camera.client.get_connection_data();
                 if prev_conn_data.uri != new_uri {
-                    println!(
+                    warn!(
                         "Updating host of camera:{} -> prev:{} new:{}",
                         camera.id, prev_conn_data.uri, new_url
                     );

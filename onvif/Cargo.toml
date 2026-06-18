@@ -16,8 +16,8 @@ anyhow = "1.0.86"
 async-trait = "0.1.89"
 chrono = "0.4.38"
 futures-util = "0.3.30"
-log = "0.4.22"
 url = "2.2.0"
 reqwest = "0.13.4"
+tracing = "0.1"
 
 app-core = { path = "../app-core" }
