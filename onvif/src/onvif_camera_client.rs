@@ -4,7 +4,7 @@ use crate::onvif_service_clients::{
 };
 use anyhow::bail;
 use app_core::{
-    domain::camera::{CameraConnectionData, CameraEvent},
+    domain::camera::{CameraConnectionData, OnvifCameraEvent},
     traits::camera_client::CameraClient,
 };
 use async_trait::async_trait;
@@ -128,7 +128,7 @@ impl CameraClient for OnvifCameraClient {
         )
     }
 
-    async fn get_event_message(&self) -> anyhow::Result<Option<CameraEvent>> {
+    async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>> {
         if let Some(client) = &self.event_subscription {
             let request = PullMessages {
                 message_limit: 256,
@@ -143,7 +143,7 @@ impl CameraClient for OnvifCameraClient {
             match pull_messages_response {
                 Ok(msg) => {
                     if is_motion_detection(&msg) {
-                        return Ok(Some(CameraEvent {
+                        return Ok(Some(OnvifCameraEvent {
                             r#type: app_core::domain::camera::CameraEventType::Motion,
                             timestamp: msg.current_time.value.to_utc(),
                         }));

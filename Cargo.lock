@@ -62,6 +62,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "network-interface",
+ "tokio",
  "tracing",
  "url",
 ]
@@ -2624,6 +2625,7 @@ dependencies = [
  "onvif 0.1.0",
  "repository",
  "teloxide",
+ "tokio",
  "tracing",
 ]
 

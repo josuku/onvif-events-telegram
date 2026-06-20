@@ -1,13 +1,14 @@
 mod app_command_processor;
 mod config;
+mod daily_report;
+mod detection_checker;
 
 use crate::app_command_processor::AppCommandProcessor;
-use app_core::{
-    make_caption,
-    traits::{command_processor::CommandProcessor, notifier::Notifier},
-};
+use crate::daily_report::manage_daily_report;
+use crate::detection_checker::check_for_detections_in_cameras;
+use app_core::domain::event_bus::EventBus;
+use app_core::traits::{command_processor::CommandProcessor, notifier::Notifier};
 use config::AppConfig;
-use onvif::onvif_camera_client::create_onvif_camera_client;
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
 use std::fs::OpenOptions;
@@ -28,6 +29,8 @@ async fn main() {
     let config = read_config();
 
     info!("START Application with config {:?}", config);
+
+    let event_bus = Arc::new(EventBus::new(100));
 
     let repo_store = Arc::new(DbStore::new());
     repo_store.create_tables();
@@ -55,11 +58,13 @@ async fn main() {
         config.telegram.bot_token.clone(),
         config.telegram.user_ids.clone(),
         app_command_processor,
+        notifier.clone(),
+        event_bus.clone(),
     ));
 
     select! {
         _ = start_bot(telegram_bot) => (),
-        _ = start_polling(notifier, repository) => (),
+        _ = start_polling(notifier, repository, event_bus.clone()) => (),
         _ = signal::ctrl_c() => info!("Closing app"),
     }
 }
@@ -78,10 +83,14 @@ async fn start_bot(telegram_bot: Arc<TelegramBot>) {
     telegram_bot.start().await;
 }
 
-async fn start_polling(notifier: Arc<dyn Notifier>, repository: Arc<MemoryRepository>) {
+async fn start_polling(
+    notifier: Arc<dyn Notifier>,
+    repository: Arc<MemoryRepository>,
+    event_bus: Arc<EventBus>,
+) {
     let mut last_polling = chrono::Local::now();
     loop {
-        check_for_detections_in_cameras(notifier.clone(), repository.clone()).await;
+        check_for_detections_in_cameras(repository.clone(), event_bus.clone()).await;
         manage_daily_report(notifier.clone(), repository.clone(), last_polling).await;
 
         last_polling = chrono::Local::now();
@@ -93,178 +102,11 @@ async fn start_polling(notifier: Arc<dyn Notifier>, repository: Arc<MemoryReposi
     }
 }
 
-async fn check_for_detections_in_cameras(
-    notifier: Arc<dyn Notifier>,
-    repository: Arc<MemoryRepository>,
-) {
-    let now = chrono::Utc::now();
-
-    for camera in repository.get_cameras().await {
-        let msg = match camera.client.get_event_message().await {
-            Ok(msg) => match msg {
-                Some(msg) => msg,
-                None => continue,
-            },
-            Err(err) => {
-                error!("error getting pull message. error:{}", err);
-                let conn_data = camera.client.get_connection_data();
-                match create_onvif_camera_client(
-                    &conn_data.uri,
-                    &conn_data.username,
-                    &conn_data.password,
-                )
-                .await
-                {
-                    Ok(client) => {
-                        if let Err(err) = repository
-                            .replace_camera_client(camera.id, Arc::new(client))
-                            .await
-                        {
-                            error!("cannot replace camera client in repository. error:{}", err);
-                        }
-                        continue;
-                    }
-                    Err(err) => {
-                        error!("cannot create onvif camera client. error:{}", err);
-                        continue;
-                    }
-                };
-            }
-        };
-
-        repository
-            .update_last_polling_from_camera(camera.id, now)
-            .await;
-
-        let snapshot = match camera.client.snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                error!(
-                    "error getting snapshot from camera:{}. error:{}",
-                    camera.name, err
-                );
-                continue;
-            }
-        };
-
-        notifier
-            .send_text_with_picture_message(
-                make_caption("New Detection", &camera.name, &msg.timestamp),
-                snapshot.clone(),
-                camera.subscriptors.clone(),
-                camera.id,
-            )
-            .await;
-
-        info!(
-            "{} - new detection in camera:{}",
-            msg.timestamp, camera.name
-        );
-    }
-}
-
-async fn manage_daily_report(
-    notifier: Arc<dyn Notifier>,
-    repository: Arc<MemoryRepository>,
-    last_polling: chrono::DateTime<chrono::Local>,
-) {
-    let now = chrono::Local::now();
-    let chat_ids = repository.get_daily_report_subscriptors().await;
-    if !chat_ids.is_empty() && last_polling.date_naive() != now.date_naive() {
-        info!("Sending daily report: {}", now.format("%Y-%m-%d %H:%M:%S"));
-
-        let mut report = String::new();
-        report.push_str(&format!("Daily report {}\n", last_polling.date_naive()));
-
-        for camera in repository.get_sorted_cameras().await {
-            let notifications = repository.get_today_camera_notifications(camera.id).await;
-            let mut status = "";
-            if !camera.client.connected() {
-                status = "\n (disconnected)";
-            }
-            let mut last_sync = "".to_string();
-            if let Some(last_polling_time) =
-                repository.get_last_polling_from_camera(camera.id).await
-            {
-                last_sync = format!("\n   (sync: {})", time_ago(now.to_utc(), last_polling_time));
-            }
-
-            report.push_str(&format!(
-                " - Camera {}-{}: {} detections{}{}\n",
-                camera.id,
-                camera.name,
-                notifications.len(),
-                status,
-                last_sync,
-            ));
-        }
-
-        notifier.send_text_message(report, chat_ids).await;
-
-        repository.clear_today_notifications().await;
-    }
-}
-
-fn time_ago(to: chrono::DateTime<chrono::Utc>, from: chrono::DateTime<chrono::Utc>) -> String {
-    let duration = to.signed_duration_since(from);
-
-    if duration.num_seconds() < 60 {
-        format!("{} secs ago", duration.num_seconds())
-    } else if duration.num_minutes() < 60 {
-        format!("{} mins ago", duration.num_minutes())
-    } else if duration.num_hours() < 24 {
-        format!("{} hours ago", duration.num_hours())
-    } else {
-        format!("{} days ago", duration.num_days())
-    }
-}
-
-// fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
-//     std::fs::create_dir_all("logs")?;
-
-//     // Daily rotation version:
-//     // let file_appender = tracing_appender::rolling::daily("logs", "onvif-events.log");
-
-//     let log_file = OpenOptions::new()
-//         .create(true)
-//         .append(true)
-//         .open("logs/onvif-events.log")?;
-
-//     let (writer, guard) = non_blocking(log_file);
-
-//     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-//     let console_layer = fmt::layer()
-//         .with_target(false)
-//         .with_file(true)
-//         .with_line_number(true)
-//         .with_thread_ids(false)
-//         .with_ansi(true);
-
-//     // let file_layer = fmt::layer()
-//     //     .with_writer(writer)
-//     //     .with_target(false)
-//     //     .with_file(true)
-//     //     .with_line_number(true)
-//     //     .with_thread_ids(false)
-//     //     .with_ansi(false);
-
-//     let file_layer = fmt::layer()
-//         .with_writer(writer)
-//         .with_ansi(false)
-//         .compact();
-
-//     tracing_subscriber::registry()
-//         .with(filter)
-//         .with(console_layer)
-//         .with(file_layer)
-//         .init();
-
-//     Ok(guard)
-// }
-
 pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     std::fs::create_dir_all("logs")?;
+
+    // Daily rotation version:
+    // let file_appender = tracing_appender::rolling::daily("logs", "onvif-events.log");
 
     let file = OpenOptions::new()
         .create(true)

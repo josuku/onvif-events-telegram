@@ -1,44 +1,17 @@
 use anyhow::bail;
-use app_core::{CameraId, ChatId, domain::discovery_device::DiscoveryDevice};
+use app_core::{
+    CameraId, ChatId,
+    domain::{camera::CameraData, discovery_device::DiscoveryDevice},
+};
 use chrono::Utc;
 use onvif::onvif_camera_client::create_onvif_camera_client;
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use url::Url;
 
 use super::db_store::DbStore;
 use app_core::traits::camera_client::CameraClient;
-
-#[derive(Clone)]
-pub struct CameraData {
-    pub id: CameraId,
-    pub name: String,
-    pub address: String,
-    pub snapshot_uri: Option<String>,
-    pub client: Arc<dyn CameraClient>,
-    pub subscriptors: Vec<ChatId>,
-}
-impl fmt::Display for CameraData {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            r#"
-Camera {}
-- Name: {}
-- Uri: {:?}
-- Address: {}
-- SnapshotUri: {} 
-- Subscriptors: {}"#,
-            self.id,
-            self.name,
-            self.client.get_connection_data().uri,
-            self.address,
-            self.snapshot_uri.clone().unwrap_or_default(),
-            self.subscriptors.len(),
-        )
-    }
-}
 
 pub struct MemoryRepository {
     cameras: Mutex<HashMap<CameraId, CameraData>>,

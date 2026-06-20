@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 async-trait = "0.1.89"
 chrono = "0.4.38"
 teloxide = { version = "0.13", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 app-core = { path = "../app-core" }

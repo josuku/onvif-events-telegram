@@ -1,4 +1,9 @@
-use app_core::{traits::command_processor::CommandProcessor, CameraId};
+use app_core::{
+    domain::event_bus::EventBus,
+    make_caption,
+    traits::{command_processor::CommandProcessor, notifier::Notifier},
+    CameraId,
+};
 use std::sync::Arc;
 use teloxide::{
     dispatching::{Dispatcher, HandlerExt, UpdateFilterExt},
@@ -45,6 +50,8 @@ pub struct TelegramBot {
     client: Bot,
     allowed_chat_ids: Vec<String>,
     command_processor: Arc<dyn CommandProcessor>,
+    notifier: Arc<dyn Notifier>,
+    event_bus: Arc<EventBus>,
 }
 
 impl TelegramBot {
@@ -52,11 +59,15 @@ impl TelegramBot {
         bot_token: String,
         chat_ids: Vec<String>,
         command_processor: Arc<dyn CommandProcessor>,
+        notifier: Arc<dyn Notifier>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             client: Bot::new(bot_token),
             allowed_chat_ids: chat_ids,
             command_processor,
+            notifier,
+            event_bus,
         }
     }
 
@@ -67,6 +78,8 @@ impl TelegramBot {
                 .endpoint(process_command),
         );
 
+        self.event_listener();
+
         Dispatcher::builder(self.client.clone(), handler)
             .dependencies(dptree::deps![
                 self.allowed_chat_ids.clone(),
@@ -76,6 +89,24 @@ impl TelegramBot {
             .build()
             .dispatch()
             .await;
+    }
+
+    fn event_listener(&self) {
+        let mut rx = self.event_bus.subscribe();
+
+        let notifier = self.notifier.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                notifier
+                    .send_text_with_picture_message(
+                        make_caption("New Detection", &event.camera.name, &event.timestamp),
+                        event.snapshot.clone(),
+                        event.camera.subscriptors.clone(),
+                        event.camera.id,
+                    )
+                    .await;
+            }
+        });
     }
 }
 
