@@ -30,6 +30,44 @@ impl AppCommandProcessor {
             .send_text_message(error.to_owned(), vec![chat_id])
             .await;
     }
+
+    async fn get_snapshot_of_camera_id(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+    ) -> anyhow::Result<()> {
+        let camera = match self.repository.get_camera(camera_id).await {
+            Some(camera) => camera,
+            None => {
+                let error = format!("cannot find camera with id: {}", camera_id);
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        };
+
+        let snapshot = match camera.client.snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let error = format!(
+                    "error getting snapshot from camera:{:?} err:{}",
+                    camera.name, err
+                );
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        };
+
+        _ = self
+            .notifier
+            .send_picture_message(
+                &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
+                snapshot.clone(),
+                chat_id,
+            )
+            .await;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -153,40 +191,24 @@ impl CommandProcessor for AppCommandProcessor {
         Ok(())
     }
 
-    async fn get_snapshot_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()> {
+    async fn get_snapshot_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: Option<CameraId>,
+    ) -> anyhow::Result<()> {
         info!(
-            "command GetSnapshotOfCamera - chat id:{} camera_id:{}",
+            "command GetSnapshotOfCamera - chat id:{} camera_id:{:?}",
             chat_id, camera_id
         );
-        let camera = match self.repository.get_camera(camera_id).await {
-            Some(camera) => camera,
-            None => {
-                let error = format!("cannot find camera with id: {}", camera_id);
-                self.print_and_send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
 
-        let snapshot = match camera.client.snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                let error = format!(
-                    "error getting snapshot from camera:{:?} err:{}",
-                    camera.name, err
-                );
-                self.print_and_send_error(&error, chat_id).await;
-                anyhow::bail!(error);
+        if let Some(camera_id) = camera_id {
+            let _ = self.get_snapshot_of_camera_id(chat_id, camera_id).await;
+        } else {
+            for camera in self.repository.get_sorted_cameras().await.iter() {
+                let _ = self.get_snapshot_of_camera_id(chat_id, camera.id).await;
             }
-        };
+        }
 
-        _ = self
-            .notifier
-            .send_picture_message(
-                &make_caption("Snapshot", &camera.name, &chrono::Utc::now()),
-                snapshot.clone(),
-                chat_id,
-            )
-            .await;
         Ok(())
     }
 

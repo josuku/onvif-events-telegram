@@ -30,8 +30,8 @@ pub enum BotCommand {
     Subscribe(CameraId),
     #[command(description = "unsubscribe from camera id. params: camera_id")]
     Unsubscribe(CameraId),
-    #[command(description = "get snapshot of camera id. params: camera_id")]
-    GetSnapshot(CameraId),
+    #[command(description = "get snapshot of camera id or of every camera. optional params: camera_id")]
+    GetSnapshot(String),
     // TODO
     // #[command(description = "get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)")]
     // GetSnapshotEvery(CameraId, String),
@@ -172,10 +172,14 @@ async fn process_command(
             .unsubscribe_cmd(chat_id, camera_id)
             .await
             .map_err(anyhow_to_response_error)?,
-        BotCommand::GetSnapshot(camera_id) => command_processor
-            .get_snapshot_cmd(chat_id, camera_id)
-            .await
-            .map_err(anyhow_to_response_error)?,
+        BotCommand::GetSnapshot(camera_id) => {
+            let camera_id = camera_id.parse::<CameraId>().ok();
+
+            command_processor
+                .get_snapshot_cmd(chat_id, camera_id)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
         BotCommand::SetPollingTime(seconds) => command_processor
             .set_polling_time_cmd(chat_id, seconds)
             .await

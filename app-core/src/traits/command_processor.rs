@@ -13,7 +13,11 @@ pub trait CommandProcessor: Send + Sync {
     ) -> anyhow::Result<()>;
     async fn subscribe_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()>;
     async fn unsubscribe_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()>;
-    async fn get_snapshot_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()>;
+    async fn get_snapshot_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: Option<CameraId>,
+    ) -> anyhow::Result<()>;
     async fn set_polling_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
     async fn set_between_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
     async fn fix_snapshot_uri_cmd(
