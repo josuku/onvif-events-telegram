@@ -331,19 +331,19 @@ impl MemoryRepository {
     ) -> anyhow::Result<()> {
         let current_cameras = self.get_cameras().await;
         for new_device in new_devices {
-            if !current_cameras
-                .iter()
-                .any(|camera| camera.address == new_device.address)
+            let mut new_uri = "".to_string();
+            if !new_device.urls.is_empty()
+                && let Some(url) = new_device.urls.first()
             {
-                let mut uri = "".to_string();
-                if !new_device.urls.is_empty()
-                    && let Some(url) = new_device.urls.first()
-                {
-                    uri = make_uri(url);
-                }
+                new_uri = make_uri(url);
+            }
 
+            if !current_cameras.iter().any(|camera| {
+                camera.address == new_device.address
+                    || camera.client.get_connection_data().uri == new_uri
+            }) {
                 // TODO user-pass empty by default
-                let mut client = create_onvif_camera_client(&uri, "", "")
+                let mut client = create_onvif_camera_client(&new_uri, "", "")
                     .await
                     .map_err(|err| anyhow::anyhow!({ err }))?;
 
@@ -355,7 +355,7 @@ impl MemoryRepository {
                         snapshot_uri
                     );
 
-                    client = create_onvif_camera_client(&uri, &user, &password)
+                    client = create_onvif_camera_client(&new_uri, &user, &password)
                         .await
                         .map_err(|err| anyhow::anyhow!({ err }))?;
                 }
@@ -373,12 +373,15 @@ impl MemoryRepository {
                 {
                     bail!("{}", err);
                 }
-            } else if let Some(camera) = current_cameras
-                .iter()
-                .find(|cam| cam.address == new_device.address)
-                && let Some(new_url) = new_device.urls.first()
+            } else if let Some(camera) = current_cameras.iter().find(|cam| {
+                cam.address == new_device.address || cam.client.get_connection_data().uri == new_uri
+            }) && let Some(new_url) = new_device.urls.first()
             {
-                let new_uri = make_uri(new_url);
+                warn!(
+                    "Camera with address '{}' or uri '{}' already exists",
+                    new_device.address, new_uri
+                );
+
                 let prev_conn_data = camera.client.get_connection_data();
                 if prev_conn_data.uri != new_uri {
                     warn!(
@@ -428,11 +431,11 @@ impl MemoryRepository {
 }
 
 fn make_uri(url: &Url) -> String {
-    format!(
-        "http://{}:{}",
-        url.host_str().unwrap_or_default(),
-        url.port().unwrap_or_default(),
-    )
+    if let Some(port) = url.port() {
+        format!("http://{}:{}", url.host_str().unwrap_or_default(), port,)
+    } else {
+        format!("http://{}", url.host_str().unwrap_or_default(),)
+    }
 }
 
 fn extract_credentials(input: Option<String>) -> Option<(String, String)> {

@@ -30,7 +30,9 @@ pub enum BotCommand {
     Subscribe(CameraId),
     #[command(description = "unsubscribe from camera id. params: camera_id")]
     Unsubscribe(CameraId),
-    #[command(description = "get snapshot of camera id or of every camera. optional params: camera_id")]
+    #[command(
+        description = "get snapshot of camera id or of every camera. optional params: camera_id"
+    )]
     GetSnapshot(String),
     // TODO
     // #[command(description = "get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)")]
@@ -117,13 +119,15 @@ async fn process_command(
     command_processor: Arc<dyn CommandProcessor>,
     cmd: BotCommand,
 ) -> teloxide::requests::ResponseResult<()> {
-    if !allowed_chat_ids.contains(&format!("{}", msg.chat.id)) {
-        error!(
-            "not allowed chat id:{:?} allowed:{:?}",
-            msg.chat.id, allowed_chat_ids
-        );
-    }
     let chat_id = msg.chat.id.0;
+    if !allowed_chat_ids.contains(&format!("{chat_id}")) {
+        let error_msg = format!(
+            "not allowed chat id:{:?} allowed:{:?}",
+            chat_id, allowed_chat_ids
+        );
+        error!("{error_msg}");
+        return Err(anyhow_to_response_error(anyhow::anyhow!(error_msg)));
+    }
     match cmd {
         BotCommand::Help => command_processor
             .help_cmd(chat_id, &BotCommand::descriptions().to_string())
