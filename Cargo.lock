@@ -443,6 +443,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "diqwest"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d10611d0d3ed31b33e13ec3e31329aa2053aa4f773eb082b597f39a97e68360"
+dependencies = [
+ "digest_auth",
+ "reqwest 0.13.4",
+ "url",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,6 +1482,7 @@ dependencies = [
  "app-core",
  "async-trait",
  "chrono",
+ "diqwest",
  "futures-util",
  "onvif 0.1.0 (git+https://github.com/lumeohq/onvif-rs?rev=1b1e6fd)",
  "onvif-xsd",

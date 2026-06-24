@@ -199,6 +199,15 @@ impl MemoryRepository {
         Ok(())
     }
 
+    pub async fn delete_camera(&self, camera_id: CameraId) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        if cameras.remove(&camera_id).is_none() {
+            bail!("camera {} not found", camera_id);
+        }
+        self.repo_store.delete_camera(camera_id);
+        Ok(())
+    }
+
     pub async fn subscribe_to_camera(
         &self,
         camera_id: i64,
@@ -289,6 +298,25 @@ impl MemoryRepository {
                 camera.client = Arc::new(client);
             }
             None => bail!("cannot find camera {} to replace uri", camera_id),
+        }
+        Ok(())
+    }
+
+    pub async fn update_camera_credentials(
+        &self,
+        camera_id: CameraId,
+        client: Arc<dyn CameraClient>,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.client = client;
+                self.repo_store
+                    .update_credentials_from_camera(camera_id, username, password);
+            }
+            None => bail!("cannot find camera {} to update credentials", camera_id),
         }
         Ok(())
     }

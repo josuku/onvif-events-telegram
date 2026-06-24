@@ -21,3 +21,4 @@ reqwest = "0.13.4"
 tracing = "0.1"
 
 app-core = { path = "../app-core" }
+diqwest = "3.2.0"

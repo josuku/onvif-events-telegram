@@ -48,18 +48,21 @@ pub struct CameraData {
 }
 impl fmt::Display for CameraData {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let conn_data = self.client.get_connection_data();
         write!(
             f,
             r#"
 Camera {}
 - Name: {}
 - Uri: {:?}
+- Credentials: {}
 - Address: {}
 - SnapshotUri: {} 
 - Subscriptors: {}"#,
             self.id,
             self.name,
-            self.client.get_connection_data().uri,
+            conn_data.uri,
+            !conn_data.username.is_empty() && !conn_data.password.is_empty(),
             self.address,
             self.snapshot_uri.clone().unwrap_or_default(),
             self.subscriptors.len(),

@@ -1,3 +1,5 @@
+use app_core::domain::camera::CameraData;
+use app_core::traits::camera_client::CameraClient;
 use app_core::traits::discovery_client::DiscoveryClient;
 use app_core::{
     make_caption,
@@ -5,6 +7,7 @@ use app_core::{
     CameraId, ChatId,
 };
 use async_trait::async_trait;
+use onvif::onvif_camera_client::create_onvif_camera_client;
 use onvif::onvif_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
@@ -299,12 +302,34 @@ impl CommandProcessor for AppCommandProcessor {
                 }
             }
         } else {
-            let error = format!(
-                "camera {} does not have snapshot uri",
-                camera.client.get_connection_data().uri
-            );
-            self.print_and_send_error(&error, chat_id).await;
-            anyhow::bail!(error);
+            match camera.client.get_snapshot_uri().await {
+                Ok(uri) => {
+                    match self
+                        .repository
+                        .update_snapshot_uri_from_camera(camera_id, &uri)
+                        .await
+                    {
+                        Ok(_) => {
+                            let message = format!("camera snapshot uri resolved:{}", uri);
+                            info!("{}", message);
+                            let _ = self
+                                .notifier
+                                .send_text_message(message, vec![chat_id])
+                                .await;
+                        }
+                        Err(err) => {
+                            let error = format!("{}", err);
+                            self.print_and_send_error(&error, chat_id).await;
+                            anyhow::bail!(error);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let error = format!("cannot resolve snapshot uri: {}", err);
+                    self.print_and_send_error(&error, chat_id).await;
+                    anyhow::bail!(error);
+                }
+            }
         }
         Ok(())
     }
@@ -326,6 +351,137 @@ impl CommandProcessor for AppCommandProcessor {
             self.repository
                 .unsubscribe_from_daily_report(chat_id, true)
                 .await;
+        }
+        Ok(())
+    }
+
+    async fn add_camera_cmd(
+        &self,
+        chat_id: ChatId,
+        uri: &str,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command AddCamera - chat_id:{} uri:{} username:{}",
+            chat_id, uri, username
+        );
+
+        let client = match create_onvif_camera_client(uri, username, password).await {
+            Ok(client) => client,
+            Err(err) => {
+                let error = format!("cannot connect to camera at {}: {}", uri, err);
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        };
+
+        let snapshot_uri = client.get_snapshot_uri().await.ok();
+
+        match self
+            .repository
+            .add_camera(CameraData {
+                id: 0, // 0 -> nueva cámara, el repositorio le asigna id
+                name: uri.to_string(),
+                address: uri.to_string(),
+                snapshot_uri,
+                client: Arc::new(client),
+                subscriptors: Vec::new(),
+            })
+            .await
+        {
+            Ok(_) => {
+                let _ = self
+                    .notifier
+                    .send_text_message(
+                        "Camera added successfully. Use /getcameras to see its id and /setcameraname to rename it.".to_string(),
+                        vec![chat_id],
+                    )
+                    .await;
+            }
+            Err(err) => {
+                let error = format!("{}", err);
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn delete_camera_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()> {
+        info!(
+            "command DeleteCamera - chat_id:{} camera_id:{}",
+            chat_id, camera_id
+        );
+
+        match self.repository.delete_camera(camera_id).await {
+            Ok(_) => {
+                let _ = self
+                    .notifier
+                    .send_text_message("Camera deleted successfully".to_string(), vec![chat_id])
+                    .await;
+            }
+            Err(err) => {
+                let error = format!("{}", err);
+                self.print_and_send_error(&error, chat_id).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_credentials_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command SetCredentials - chat_id:{} camera_id:{} username:{}",
+            chat_id, camera_id, username
+        );
+
+        let uri = match self.repository.get_camera(camera_id).await {
+            Some(camera) => camera.client.get_connection_data().uri,
+            None => {
+                let error = format!("camera {} not found", camera_id);
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        };
+
+        let client = match create_onvif_camera_client(&uri, username, password).await {
+            Ok(client) => client,
+            Err(err) => {
+                let error = format!(
+                    "cannot connect to camera {} with new credentials: {}",
+                    camera_id, err
+                );
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
+        };
+
+        match self
+            .repository
+            .update_camera_credentials(camera_id, Arc::new(client), username, password)
+            .await
+        {
+            Ok(_) => {
+                let _ = self
+                    .notifier
+                    .send_text_message(
+                        "Credentials updated successfully".to_string(),
+                        vec![chat_id],
+                    )
+                    .await;
+            }
+            Err(err) => {
+                let error = format!("{}", err);
+                self.print_and_send_error(&error, chat_id).await;
+                anyhow::bail!(error);
+            }
         }
         Ok(())
     }

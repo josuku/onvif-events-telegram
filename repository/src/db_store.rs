@@ -194,6 +194,21 @@ impl DbStore {
             .unwrap();
     }
 
+    pub fn update_credentials_from_camera(
+        &self,
+        camera_id: CameraId,
+        username: &str,
+        password: &str,
+    ) {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE cameras SET username = ?1, password = ?2 WHERE id = ?3",
+                rusqlite::params![username, password, camera_id],
+            )
+            .unwrap();
+    }
+
     pub fn update_snapshot_uri_from_camera(&self, camera_id: CameraId, snapshot_uri: &str) {
         let connection = self.connection.lock().unwrap();
 
@@ -202,6 +217,21 @@ impl DbStore {
                 "UPDATE cameras SET snapshot_uri = ?1 WHERE id = ?2",
                 [snapshot_uri, &camera_id.to_string()],
             )
+            .unwrap();
+    }
+
+    pub fn delete_camera(&self, camera_id: CameraId) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "DELETE FROM camera_subscriptions WHERE camera_id = ?1",
+                [camera_id],
+            )
+            .unwrap();
+
+        connection
+            .execute("DELETE FROM cameras WHERE id = ?1", [camera_id])
             .unwrap();
     }
 

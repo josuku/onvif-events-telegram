@@ -8,6 +8,7 @@ use app_core::{
     traits::camera_client::CameraClient,
 };
 use async_trait::async_trait;
+use diqwest::WithDigestAuth;
 use onvif::soap::client::{Client as SoapClient, ClientBuilder};
 use schema::{
     b_2::NotificationMessageHolderType,
@@ -21,6 +22,7 @@ pub struct OnvifCameraClient {
     clients: Option<OnvifServiceClients>,
     event_subscription: Option<SoapClient>,
     snapshot_uri: Option<String>,
+    snapshot_requires_auth: bool,
 }
 
 impl OnvifCameraClient {
@@ -36,6 +38,7 @@ impl OnvifCameraClient {
             event_subscription: None,
             clients: create_onvif_clients(&conn_data).await,
             snapshot_uri: None,
+            snapshot_requires_auth: false,
         })
     }
 
@@ -61,8 +64,11 @@ impl OnvifCameraClient {
             }
         }
 
-        match self.get_snapshot_uri().await {
-            Ok(uri) => self.snapshot_uri = Some(uri),
+        match self.resolve_snapshot_uri().await {
+            Ok((uri, requires_auth)) => {
+                self.snapshot_uri = Some(uri);
+                self.snapshot_requires_auth = requires_auth;
+            }
             Err(err) => {
                 error!(
                     "cannot get snapshot uri for camera:{}. err:{}",
@@ -71,30 +77,28 @@ impl OnvifCameraClient {
             }
         }
     }
-}
 
-#[async_trait]
-impl CameraClient for OnvifCameraClient {
-    async fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
-        if let Some(snapshot_uri) = &self.snapshot_uri {
-            download_picture_from_uri(snapshot_uri).await
-        } else {
-            bail!("cannot download picture from camera:{}", self.conn_data.uri)
-        }
-    }
-
-    async fn get_snapshot_uri(&self) -> anyhow::Result<String> {
+    async fn resolve_snapshot_uri(&self) -> anyhow::Result<(String, bool)> {
         if let Some(clients) = &self.clients {
             if let Some(media) = &clients.media {
-                // get onvif snapshot uris
                 match get_snapshot_uris(media).await {
                     Ok(snapshot_uris) => {
+                        let creds = Some((
+                            self.conn_data.username.as_str(),
+                            self.conn_data.password.as_str(),
+                        ));
                         for snapshot_uri in snapshot_uris {
-                            match download_picture_from_uri(&snapshot_uri).await {
-                                Ok(_) => return Ok(snapshot_uri),
-                                Err(err) => {
-                                    error!("cannot download picture from uri. trying to create new onvif user. error:{}", err);
-                                    // if onvif uri doesnt work, create new user, replace credentials and try again
+                            match download_picture_from_uri(&snapshot_uri, None).await {
+                                Ok(_) => return Ok((snapshot_uri, false)),
+                                Err(_) => {
+                                    // try with auth before giving up on this URI
+                                    if download_picture_from_uri(&snapshot_uri, creds)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        return Ok((snapshot_uri, true));
+                                    }
+                                    error!("cannot download picture from uri. trying to create new onvif user.");
                                     match self
                                         .create_user_and_fix_snapshot_uri(
                                             &self.conn_data.uri,
@@ -103,8 +107,17 @@ impl CameraClient for OnvifCameraClient {
                                         .await
                                     {
                                         Ok(fixed_url) => {
-                                            if download_picture_from_uri(&fixed_url).await.is_ok() {
-                                                return Ok(fixed_url);
+                                            if download_picture_from_uri(&fixed_url, None)
+                                                .await
+                                                .is_ok()
+                                            {
+                                                return Ok((fixed_url, false));
+                                            }
+                                            if download_picture_from_uri(&fixed_url, creds)
+                                                .await
+                                                .is_ok()
+                                            {
+                                                return Ok((fixed_url, true));
                                             }
                                         }
                                         Err(err) => bail!("{}", err),
@@ -118,14 +131,34 @@ impl CameraClient for OnvifCameraClient {
                 }
             }
             bail!(
-                "media client not initilialized for camera: {}",
+                "media client not initialized for camera: {}",
                 self.conn_data.uri
             )
         }
-        bail!(
-            "no clients initilialized for camera: {}",
-            self.conn_data.uri
-        )
+        bail!("no clients initialized for camera: {}", self.conn_data.uri)
+    }
+}
+
+#[async_trait]
+impl CameraClient for OnvifCameraClient {
+    async fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        if let Some(snapshot_uri) = &self.snapshot_uri {
+            let creds = if self.snapshot_requires_auth {
+                Some((
+                    self.conn_data.username.as_str(),
+                    self.conn_data.password.as_str(),
+                ))
+            } else {
+                None
+            };
+            download_picture_from_uri(snapshot_uri, creds).await
+        } else {
+            bail!("cannot download picture from camera:{}", self.conn_data.uri)
+        }
+    }
+
+    async fn get_snapshot_uri(&self) -> anyhow::Result<String> {
+        self.resolve_snapshot_uri().await.map(|(uri, _)| uri)
     }
 
     async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>> {
@@ -281,21 +314,34 @@ fn is_motion_detection(msg: &PullMessagesResponse) -> bool {
             .is_empty()
 }
 
-async fn download_picture_from_uri(uri: &str) -> anyhow::Result<Vec<u8>> {
-    let response = match reqwest::get(uri).await {
-        Ok(resp) => {
-            if resp.status() != 200 {
-                bail!("Failed to download image. status:{}", resp.status());
-            }
-            resp
-        }
-        Err(_) => bail!("Failed to download image"),
+async fn download_picture_from_uri(
+    uri: &str,
+    credentials: Option<(&str, &str)>,
+) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::Client::new();
+
+    let response = match credentials {
+        None => client
+            .get(uri)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to download image: {}", e))?,
+        Some((username, password)) => client
+            .get(uri)
+            .send_digest_auth((username, password))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to download image with digest auth: {}", e))?,
     };
-    let image = match response.bytes().await {
-        Ok(bytes) => bytes.to_vec(),
-        Err(_) => bail!("Failed to get bytes of image"),
-    };
-    Ok(image)
+
+    if response.status() != 200 {
+        bail!("Failed to download image. status:{}", response.status());
+    }
+
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|_| anyhow::anyhow!("Failed to get bytes of image"))
 }
 
 fn replace_snapshot_uri_credentials(

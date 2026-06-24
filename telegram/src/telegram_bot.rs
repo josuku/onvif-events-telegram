@@ -45,6 +45,16 @@ pub enum BotCommand {
     FixSnapshot(CameraId),
     #[command(description = "enable/disable daily report. params: true/false")]
     DailyReport(bool),
+    #[command(
+        description = "add a camera manually. params: uri [username] [password], e.g. http://192.168.1.50:8899 admin secret"
+    )]
+    AddCamera(String),
+    #[command(description = "delete a camera. params: camera_id")]
+    DeleteCamera(CameraId),
+    #[command(
+        description = "update credentials for a camera. params: camera_id username password"
+    )]
+    SetCredentials(String),
 }
 
 #[derive(Clone)]
@@ -200,6 +210,53 @@ async fn process_command(
             .enable_daily_report_cmd(chat_id, bool)
             .await
             .map_err(anyhow_to_response_error)?,
+        BotCommand::AddCamera(params) => {
+            let mut parts = params.split_whitespace();
+            let uri = match parts.next() {
+                Some(uri) => uri,
+                None => {
+                    return Err(string_to_response_error(
+                        "usage: /addcamera uri [username] [password]".to_string(),
+                    ))
+                }
+            };
+            let username = parts.next().unwrap_or("");
+            let password = parts.next().unwrap_or("");
+
+            command_processor
+                .add_camera_cmd(chat_id, uri, username, password)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
+        BotCommand::DeleteCamera(camera_id) => command_processor
+            .delete_camera_cmd(chat_id, camera_id)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::SetCredentials(params) => {
+            let mut parts = params.split_whitespace();
+            let (camera_id, username, password) = match (parts.next(), parts.next(), parts.next()) {
+                (Some(id), Some(user), Some(pass)) => {
+                    let id: CameraId = match id.parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /setcredentials camera_id username password".to_string(),
+                            ))
+                        }
+                    };
+                    (id, user, pass)
+                }
+                _ => {
+                    return Err(string_to_response_error(
+                        "usage: /setcredentials camera_id username password".to_string(),
+                    ))
+                }
+            };
+            command_processor
+                .set_credentials_cmd(chat_id, camera_id, username, password)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
     };
     Ok(())
 }
