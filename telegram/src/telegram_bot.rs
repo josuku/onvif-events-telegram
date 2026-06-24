@@ -8,53 +8,34 @@ use std::sync::Arc;
 use teloxide::{
     dispatching::{Dispatcher, HandlerExt, UpdateFilterExt},
     dptree,
-    types::Update,
+    payloads::SendMessageSetters,
+    prelude::Requester,
+    types::{Message, ParseMode, Update},
     utils::command::BotCommands,
     Bot,
 };
 use tracing::error;
 
 #[derive(BotCommands, Clone)]
-#[command(
-    rename_rule = "lowercase",
-    description = "These commands are supported:"
-)]
+#[command(rename_rule = "lowercase")]
 pub enum BotCommand {
-    #[command(description = "show command's list.")]
+    // Help
     Help,
-    #[command(description = "get available cameras.")]
+    // Cameras
     GetCameras,
-    #[command(description = "set camera name. params camera_id camera_name")]
-    SetCameraName(String),
-    #[command(description = "subscribe to camera id. params camera_id")]
-    Subscribe(CameraId),
-    #[command(description = "unsubscribe from camera id. params: camera_id")]
-    Unsubscribe(CameraId),
-    #[command(
-        description = "get snapshot of camera id or of every camera. optional params: camera_id"
-    )]
-    GetSnapshot(String),
-    // TODO
-    // #[command(description = "get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)")]
-    // GetSnapshotEvery(CameraId, String),
-    #[command(description = "set detection checker polling time in seconds.")]
-    SetPollingTime(u64),
-    #[command(description = "set seconds between notifications.")]
-    SetBetweenTime(u64),
-    #[command(description = "fix snapshot uri camera id. params: camera_id")]
-    FixSnapshot(CameraId),
-    #[command(description = "enable/disable daily report. params: true/false")]
-    DailyReport(bool),
-    #[command(
-        description = "add a camera manually. params: uri [username] [password], e.g. http://192.168.1.50:8899 admin secret"
-    )]
     AddCamera(String),
-    #[command(description = "delete a camera. params: camera_id")]
     DeleteCamera(CameraId),
-    #[command(
-        description = "update credentials for a camera. params: camera_id username password"
-    )]
+    SetCameraName(String),
     SetCredentials(String),
+    FixSnapshot(CameraId),
+    // Events
+    Subscribe(CameraId),
+    Unsubscribe(CameraId),
+    GetSnapshot(String),
+    // TODO GetSnapshotEvery(CameraId, String), // get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)
+    SetPollingTime(u64),
+    SetBetweenTime(u64),
+    DailyReport(bool),
 }
 
 #[derive(Clone)]
@@ -84,11 +65,18 @@ impl TelegramBot {
     }
 
     pub async fn start(&self) {
-        let handler = Update::filter_message().branch(
-            dptree::entry()
-                .filter_command::<BotCommand>()
-                .endpoint(process_command),
-        );
+        let handler = Update::filter_message()
+            .branch(
+                dptree::entry()
+                    .filter_command::<BotCommand>()
+                    .endpoint(process_command),
+            )
+            .branch(
+                dptree::filter(|msg: Message| {
+                    msg.text().map(|t| t.starts_with('/')).unwrap_or(false)
+                })
+                .endpoint(unknown_command),
+            );
 
         self.event_listener();
 
@@ -123,7 +111,7 @@ impl TelegramBot {
 }
 
 async fn process_command(
-    _bot: Bot,
+    bot: Bot,
     msg: teloxide::types::Message,
     allowed_chat_ids: Vec<String>,
     command_processor: Arc<dyn CommandProcessor>,
@@ -139,10 +127,12 @@ async fn process_command(
         return Err(anyhow_to_response_error(anyhow::anyhow!(error_msg)));
     }
     match cmd {
-        BotCommand::Help => command_processor
-            .help_cmd(chat_id, &BotCommand::descriptions().to_string())
-            .await
-            .map_err(anyhow_to_response_error)?,
+        BotCommand::Help => {
+            bot.send_message(msg.chat.id, help_text())
+                .parse_mode(ParseMode::MarkdownV2)
+                .await
+                .map_err(|err| anyhow_to_response_error(anyhow::anyhow!(err.to_string())))?;
+        }
         BotCommand::GetCameras => command_processor
             .get_cameras_cmd(chat_id)
             .await
@@ -258,6 +248,48 @@ async fn process_command(
                 .map_err(anyhow_to_response_error)?
         }
     };
+    Ok(())
+}
+
+fn help_text() -> String {
+    "\
+📋 *HELP*
+/help \\- show this command list
+
+📷 *CAMERAS*
+/getcameras \\- list all cameras
+/addcamera `uri` `username` `password` \\- add a camera manually e\\.g\\. http\\://192\\.168\\.1\\.50\\:8899 admin secret
+/deletecamera `camera_id` \\- delete a camera
+/setcameraname `camera_id name` \\- rename a camera
+/setcredentials `camera_id username password` \\- update credentials
+/fixsnapshot `camera_id` \\- fix or resolve snapshot URI
+
+🔔 *EVENTS*
+/subscribe `camera_id` \\- subscribe to camera notifications
+/unsubscribe `camera_id` \\- unsubscribe from camera notifications
+/getsnapshot `[camera_id]` \\- get snapshot of one or all cameras
+/setpollingtime `seconds` \\- set detection polling interval
+/setbetweentime `seconds` \\- set minimum time between notifications
+/dailyreport `true|false` \\- enable or disable daily status report"
+        .to_string()
+}
+
+async fn unknown_command(
+    bot: Bot,
+    msg: Message,
+    allowed_chat_ids: Vec<String>,
+) -> teloxide::requests::ResponseResult<()> {
+    let chat_id = msg.chat.id;
+    if !allowed_chat_ids.contains(&format!("{}", chat_id.0)) {
+        return Ok(());
+    }
+    let text = msg.text().unwrap_or("");
+    let command = text.split_whitespace().next().unwrap_or(text);
+    bot.send_message(
+        chat_id,
+        format!("Unknown command: {command}\nUse /help to see available commands."),
+    )
+    .await?;
     Ok(())
 }
 
