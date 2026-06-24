@@ -1,17 +1,17 @@
-use std::{fmt, sync::Arc};
-
-use chrono::{DateTime, Utc};
-
 use crate::{CameraId, ChatId, traits::camera_client::CameraClient};
+use chrono::{DateTime, Utc};
+use std::{fmt, sync::Arc};
 
 #[derive(Clone, Debug, Copy)]
 pub enum CameraEventType {
     Motion,
+    Tamper,
 }
 impl fmt::Display for CameraEventType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             CameraEventType::Motion => write!(f, "Motion"),
+            CameraEventType::Tamper => write!(f, "Tamper"),
         }
     }
 }

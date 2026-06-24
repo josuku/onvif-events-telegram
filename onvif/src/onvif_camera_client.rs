@@ -4,12 +4,12 @@ use crate::onvif_service_clients::{
 };
 use anyhow::bail;
 use app_core::{
-    domain::camera::{CameraConnectionData, OnvifCameraEvent},
+    domain::camera::{CameraConnectionData, CameraEventType, OnvifCameraEvent},
     traits::camera_client::CameraClient,
 };
 use async_trait::async_trait;
 use diqwest::WithDigestAuth;
-use onvif::soap::client::{Client as SoapClient, ClientBuilder};
+use onvif::soap::client::{AuthType, Client as SoapClient, ClientBuilder};
 use schema::{
     b_2::NotificationMessageHolderType,
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
@@ -49,13 +49,14 @@ impl OnvifCameraClient {
 
         if let Some(clients) = &self.clients {
             if let Some(event) = &clients.event {
-                self.event_subscription = match create_event_pull_message_client(event).await {
-                    Ok(pull_client) => Some(pull_client),
-                    Err(err) => {
-                        error!("cannot create pull client. err:{}", err);
-                        None
+                self.event_subscription =
+                    match create_event_pull_message_client(event, &self.conn_data).await {
+                        Ok(pull_client) => Some(pull_client),
+                        Err(err) => {
+                            error!("cannot create pull client. err:{}", err);
+                            None
+                        }
                     }
-                }
             } else {
                 error!(
                     "cannot create event subscription for camera:{}",
@@ -175,12 +176,13 @@ impl CameraClient for OnvifCameraClient {
 
             match pull_messages_response {
                 Ok(msg) => {
-                    if is_motion_detection(&msg) {
+                    if let Some(event_type) = parse_event_type(&msg) {
                         return Ok(Some(OnvifCameraEvent {
-                            r#type: app_core::domain::camera::CameraEventType::Motion,
+                            r#type: event_type,
                             timestamp: msg.current_time.value.to_utc(),
                         }));
                     } else {
+                        tracing::debug!("unrecognized event:{:?}", msg);
                         return Ok(None);
                     }
                 }
@@ -264,54 +266,85 @@ async fn create_onvif_clients(conn_data: &CameraConnectionData) -> Option<OnvifS
     }
 }
 
-async fn create_event_pull_message_client(event_client: &SoapClient) -> anyhow::Result<SoapClient> {
+async fn create_event_pull_message_client(
+    event_client: &SoapClient,
+    conn_data: &CameraConnectionData,
+) -> anyhow::Result<SoapClient> {
     let request = CreatePullPointSubscription {
         initial_termination_time: None,
         filter: None,
         subscription_policy: None,
     };
 
-    let response = event::create_pull_point_subscription(event_client, &request).await;
-
-    let camera_sub = match response {
+    let camera_sub = match event::create_pull_point_subscription(event_client, &request).await {
         Ok(sub) => sub,
-        Err(err) => {
-            bail!("cannot create pull point subscription:{}", err);
+        Err(_) => {
+            // Some cameras (Dahua) require expplicit UsernameToken, retry with it
+            let base_uri = Url::parse(&conn_data.uri).unwrap();
+            let event_uri = base_uri.join("/onvif/event_service").unwrap();
+
+            tracing::warn!(
+                "trying to create again with event_uri:{} with username:{} and Digest",
+                event_uri,
+                conn_data.username
+            );
+            let retry_client = ClientBuilder::new(&event_uri)
+                .credentials(Some(onvif::soap::client::Credentials {
+                    username: conn_data.username.clone(),
+                    password: conn_data.password.clone(),
+                }))
+                .auth_type(AuthType::Digest)
+                .build();
+            event::create_pull_point_subscription(&retry_client, &request)
+                .await
+                .map_err(|err| anyhow::anyhow!("cannot create pull point subscription: {}", err))?
         }
     };
 
-    // debug!(
-    //     "camera pull point subscription termination: {:?}",
-    //     camera_sub.termination_time
-    // );
+    let uri = Url::parse(&camera_sub.subscription_reference.address)
+        .map_err(|e| anyhow::anyhow!("invalid subscription reference address: {}", e))?;
 
-    let uri: Url = Url::parse(&camera_sub.subscription_reference.address).unwrap();
-    Ok(ClientBuilder::new(&uri).build())
+    Ok(ClientBuilder::new(&uri)
+        .credentials(Some(onvif::soap::client::Credentials {
+            username: conn_data.username.clone(),
+            password: conn_data.password.clone(),
+        }))
+        .auth_type(AuthType::Digest)
+        .build())
 }
 
-// TODO add other detection types like tamper, etc...
-fn is_motion_detection(msg: &PullMessagesResponse) -> bool {
-    !msg.notification_message.is_empty()
-        && !msg
-            .notification_message
-            .iter()
-            .filter(|msg| {
-                msg.message
-                    .msg
-                    .source
-                    .simple_item
-                    .iter()
-                    .any(|si| si.name == "Rule" && si.value == "MyMotionDetectorRule")
-                    && msg
-                        .message
-                        .msg
-                        .data
-                        .simple_item
-                        .iter()
-                        .any(|si| si.name == "IsMotion" && si.value == "true")
-            })
-            .collect::<Vec<&NotificationMessageHolderType>>()
-            .is_empty()
+fn has_item(msg: &NotificationMessageHolderType, name: &str, value: &str) -> bool {
+    msg.message
+        .msg
+        .data
+        .simple_item
+        .iter()
+        .any(|si| si.name == name && si.value == value)
+}
+
+fn parse_event_type(msg: &PullMessagesResponse) -> Option<CameraEventType> {
+    for notification in &msg.notification_message {
+        let topic = notification.topic.inner_text.as_str();
+
+        if topic == "tns1:RuleEngine/CellMotionDetector/Motion"
+            && has_item(notification, "IsMotion", "true")
+        {
+            return Some(CameraEventType::Motion);
+        }
+
+        // maybe is repeated with upper Motion detection
+        // if topic == "tns1:VideoSource/MotionAlarm" && has_item(msg, "State", "true") {
+        //     return Some(CameraEventType::Motion);
+        // }
+
+        if topic == "tns1:RuleEngine/TamperDetector/Tamper"
+            && has_item(notification, "IsTamper", "true")
+        {
+            return Some(CameraEventType::Tamper);
+        }
+    }
+
+    None
 }
 
 async fn download_picture_from_uri(

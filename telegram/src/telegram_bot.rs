@@ -99,7 +99,12 @@ impl TelegramBot {
             while let Ok(event) = rx.recv().await {
                 notifier
                     .send_text_with_picture_message(
-                        make_caption("New Detection", &event.camera.name, &event.timestamp),
+                        make_caption(
+                            "New Detection",
+                            &event.camera.name,
+                            &event.timestamp,
+                            Some(event.r#type),
+                        ),
                         event.snapshot.clone(),
                         event.camera.subscriptors.clone(),
                         event.camera.id,
