@@ -8,12 +8,14 @@ use app_core::{
     traits::camera_client::CameraClient,
 };
 use async_trait::async_trait;
-use diqwest::WithDigestAuth;
+use diqwest::{DigestAuthSession, WithDigestAuth};
+use futures_util::lock::Mutex;
 use onvif::soap::client::{AuthType, Client as SoapClient, ClientBuilder};
 use schema::{
     b_2::NotificationMessageHolderType,
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
 };
+use std::sync::Arc;
 use tracing::error;
 use url::Url;
 
@@ -23,6 +25,8 @@ pub struct OnvifCameraClient {
     event_subscription: Option<SoapClient>,
     snapshot_uri: Option<String>,
     snapshot_requires_auth: bool,
+    http_client: reqwest::Client,
+    digest_session: Option<Arc<Mutex<DigestAuthSession>>>,
 }
 
 impl OnvifCameraClient {
@@ -39,6 +43,8 @@ impl OnvifCameraClient {
             clients: create_onvif_clients(&conn_data).await,
             snapshot_uri: None,
             snapshot_requires_auth: false,
+            http_client: reqwest::Client::new(),
+            digest_session: None,
         })
     }
 
@@ -69,6 +75,12 @@ impl OnvifCameraClient {
             Ok((uri, requires_auth)) => {
                 self.snapshot_uri = Some(uri);
                 self.snapshot_requires_auth = requires_auth;
+                if requires_auth {
+                    self.digest_session = Some(Arc::new(Mutex::new(DigestAuthSession::new(
+                        &self.conn_data.username,
+                        &self.conn_data.password,
+                    ))));
+                }
             }
             Err(err) => {
                 error!(
@@ -84,18 +96,23 @@ impl OnvifCameraClient {
             if let Some(media) = &clients.media {
                 match get_snapshot_uris(media).await {
                     Ok(snapshot_uris) => {
-                        let creds = Some((
+                        let creds = (
                             self.conn_data.username.as_str(),
                             self.conn_data.password.as_str(),
-                        ));
+                        );
                         for snapshot_uri in snapshot_uris {
-                            match download_picture_from_uri(&snapshot_uri, None).await {
+                            match download_picture_from_uri(&self.http_client, &snapshot_uri).await
+                            {
                                 Ok(_) => return Ok((snapshot_uri, false)),
                                 Err(_) => {
                                     // try with auth before giving up on this URI
-                                    if download_picture_from_uri(&snapshot_uri, creds)
-                                        .await
-                                        .is_ok()
+                                    if download_picture_from_uri_with_creds(
+                                        &self.http_client,
+                                        &snapshot_uri,
+                                        creds,
+                                    )
+                                    .await
+                                    .is_ok()
                                     {
                                         return Ok((snapshot_uri, true));
                                     }
@@ -108,15 +125,22 @@ impl OnvifCameraClient {
                                         .await
                                     {
                                         Ok(fixed_url) => {
-                                            if download_picture_from_uri(&fixed_url, None)
-                                                .await
-                                                .is_ok()
+                                            if download_picture_from_uri(
+                                                &self.http_client,
+                                                &fixed_url,
+                                            )
+                                            .await
+                                            .is_ok()
                                             {
                                                 return Ok((fixed_url, false));
                                             }
-                                            if download_picture_from_uri(&fixed_url, creds)
-                                                .await
-                                                .is_ok()
+                                            if download_picture_from_uri_with_creds(
+                                                &self.http_client,
+                                                &fixed_url,
+                                                creds,
+                                            )
+                                            .await
+                                            .is_ok()
                                             {
                                                 return Ok((fixed_url, true));
                                             }
@@ -144,15 +168,20 @@ impl OnvifCameraClient {
 impl CameraClient for OnvifCameraClient {
     async fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
         if let Some(snapshot_uri) = &self.snapshot_uri {
-            let creds = if self.snapshot_requires_auth {
-                Some((
-                    self.conn_data.username.as_str(),
-                    self.conn_data.password.as_str(),
-                ))
+            let t0 = std::time::Instant::now();
+            let result = if let Some(session) = &self.digest_session {
+                let session = session.lock().await;
+                download_picture_with_session(&self.http_client, snapshot_uri, &session).await
             } else {
-                None
+                download_picture_from_uri(&self.http_client, snapshot_uri).await
             };
-            download_picture_from_uri(snapshot_uri, creds).await
+            tracing::debug!(
+                "snapshot from {} took {}ms (digest_auth:{})",
+                self.conn_data.uri,
+                t0.elapsed().as_millis(),
+                self.snapshot_requires_auth,
+            );
+            result
         } else {
             bail!("cannot download picture from camera:{}", self.conn_data.uri)
         }
@@ -347,24 +376,57 @@ fn parse_event_type(msg: &PullMessagesResponse) -> Option<CameraEventType> {
     None
 }
 
-async fn download_picture_from_uri(
-    uri: &str,
-    credentials: Option<(&str, &str)>,
-) -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::Client::new();
+async fn download_picture_from_uri(client: &reqwest::Client, uri: &str) -> anyhow::Result<Vec<u8>> {
+    let response = client
+        .get(uri)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to download image: {}", e))?;
 
-    let response = match credentials {
-        None => client
-            .get(uri)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to download image: {}", e))?,
-        Some((username, password)) => client
-            .get(uri)
-            .send_digest_auth((username, password))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to download image with digest auth: {}", e))?,
-    };
+    if response.status() != 200 {
+        bail!("Failed to download image. status:{}", response.status());
+    }
+
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|_| anyhow::anyhow!("Failed to get bytes of image"))
+}
+
+async fn download_picture_from_uri_with_creds(
+    client: &reqwest::Client,
+    uri: &str,
+    credentials: (&str, &str),
+) -> anyhow::Result<Vec<u8>> {
+    let (username, password) = credentials;
+    let response = client
+        .get(uri)
+        .send_digest_auth((username, password))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to download image with digest auth: {}", e))?;
+
+    if response.status() != 200 {
+        bail!("Failed to download image. status:{}", response.status());
+    }
+
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|_| anyhow::anyhow!("Failed to get bytes of image"))
+}
+
+async fn download_picture_with_session(
+    client: &reqwest::Client,
+    uri: &str,
+    session: &DigestAuthSession,
+) -> anyhow::Result<Vec<u8>> {
+    let response = client
+        .get(uri)
+        .send_digest_auth(session)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to download image with digest auth: {}", e))?;
 
     if response.status() != 200 {
         bail!("Failed to download image. status:{}", response.status());
