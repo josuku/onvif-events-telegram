@@ -51,8 +51,7 @@ impl fmt::Display for CameraData {
         let conn_data = self.client.get_connection_data();
         write!(
             f,
-            r#"
-Camera {}
+            r#"Camera {}
 - Name: {}
 - Uri: {:?}
 - Credentials: {}

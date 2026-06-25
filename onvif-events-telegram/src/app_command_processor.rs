@@ -1,4 +1,5 @@
 use app_core::domain::camera::CameraData;
+use app_core::helpers::network::is_reachable;
 use app_core::traits::camera_client::CameraClient;
 use app_core::traits::discovery_client::DiscoveryClient;
 use app_core::{
@@ -101,15 +102,16 @@ impl CommandProcessor for AppCommandProcessor {
                 .send_text_message("No available cameras".to_string(), vec![chat_id])
                 .await;
         } else {
-            self.notifier
-                .send_text_message("Available cameras are:".to_string(), vec![chat_id])
-                .await;
             cameras.sort_by_key(|a| a.id);
+            let mut lines = vec!["Available cameras:".to_string()];
             for camera in cameras {
-                self.notifier
-                    .send_text_message(camera.to_string(), vec![chat_id])
-                    .await;
+                let reachable = is_reachable(&camera.client.get_connection_data().uri).await;
+                let status = if reachable { "🟢" } else { "🔴" };
+                lines.push(format!("{status} {camera}"));
             }
+            self.notifier
+                .send_text_message(lines.join("\n"), vec![chat_id])
+                .await;
         }
         Ok(())
     }
