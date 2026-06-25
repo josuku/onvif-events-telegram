@@ -2,10 +2,12 @@ mod app_command_processor;
 mod config;
 mod daily_report;
 mod detection_checker;
+mod subscription_manager;
 
 use crate::app_command_processor::AppCommandProcessor;
 use crate::daily_report::manage_daily_report;
 use crate::detection_checker::check_for_detections_in_cameras;
+use crate::subscription_manager::{close_subscriptions, renew_subscriptions};
 use app_core::domain::event_bus::EventBus;
 use app_core::traits::{command_processor::CommandProcessor, notifier::Notifier};
 use config::AppConfig;
@@ -64,8 +66,12 @@ async fn main() {
 
     select! {
         _ = start_bot(telegram_bot) => (),
-        _ = start_polling(notifier, repository, event_bus.clone()) => (),
-        _ = signal::ctrl_c() => info!("Closing app"),
+        _ = start_polling(notifier, repository.clone(), event_bus.clone()) => (),
+        _ = renew_subscriptions(repository.clone()) => (),
+        _ = signal::ctrl_c() => {
+            close_subscriptions(repository).await;
+            info!("Closing app")
+        },
     }
 }
 

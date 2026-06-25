@@ -14,4 +14,6 @@ pub trait CameraClient: Send + Sync {
         camera_uri: &str,
         orig_snapshot_uri: &str,
     ) -> anyhow::Result<String>;
+    async fn unsubscribe(&self);
+    async fn renew_subscription(&self, termination_time: &str);
 }

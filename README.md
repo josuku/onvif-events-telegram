@@ -27,6 +27,10 @@ Service is made using onvif-rs and a modified version of rustygram crate to perm
 
 TODOs
 
+- save polling and between timeouts in SQLite
+- reboot camera command (maybe indicate if polling has errors)
+- add getvideo command indicating camera and number or seconds or minutes
+- add zoom in-out command if possible (for varifocal)
 - add Dockerfile (check if existing is valid)
 - add yolo to pipeline to detect persons-animals-objects
 - save detections in postgres and pictures in a folder (in future must have a cleanup process)

@@ -44,6 +44,7 @@ async fn check_camera(
         Ok(None) => return,
         Err(err) => {
             error!("error getting pull message. error:{}", err);
+            camera.client.unsubscribe().await;
             let conn_data = camera.client.get_connection_data();
             match create_onvif_camera_client(
                 &conn_data.uri,

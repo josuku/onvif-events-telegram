@@ -14,10 +14,13 @@ use onvif::soap::client::{AuthType, Client as SoapClient, ClientBuilder};
 use schema::{
     b_2::NotificationMessageHolderType,
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
+    transport::Transport,
 };
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 use tracing::error;
 use url::Url;
+
+pub const PULL_SUBSCRIPTION_TIMEOUT: &str = "PT30M"; // 30 minutes
 
 pub struct OnvifCameraClient {
     conn_data: CameraConnectionData,
@@ -257,6 +260,44 @@ impl CameraClient for OnvifCameraClient {
             }
         }
     }
+
+    async fn unsubscribe(&self) {
+        let Some(sub_client) = &self.event_subscription else {
+            return;
+        };
+        let body = r#"<wsnt:Unsubscribe xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"/>"#;
+        match sub_client.request(body).await {
+            Ok(_) => tracing::info!("unsubscribed from camera:{}", self.conn_data.uri),
+            Err(err) => tracing::warn!(
+                "unsubscribe failed for camera:{} (ignored, subscription will expire): {}",
+                self.conn_data.uri,
+                err
+            ),
+        }
+    }
+
+    async fn renew_subscription(&self, termination_time: &str) {
+        let Some(sub_client) = &self.event_subscription else {
+            return;
+        };
+        let body = format!(
+            r#"<wsnt:Renew xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
+                 <wsnt:TerminationTime>{termination_time}</wsnt:TerminationTime>
+               </wsnt:Renew>"#
+        );
+        match sub_client.request(&body).await {
+            Ok(_) => tracing::info!(
+                "subscription renewed for camera:{} until +{}",
+                self.conn_data.uri,
+                termination_time
+            ),
+            Err(err) => tracing::warn!(
+                "subscription renew failed for camera:{}: {}",
+                self.conn_data.uri,
+                err
+            ),
+        }
+    }
 }
 
 pub async fn create_onvif_camera_client(
@@ -299,8 +340,14 @@ async fn create_event_pull_message_client(
     event_client: &SoapClient,
     conn_data: &CameraConnectionData,
 ) -> anyhow::Result<SoapClient> {
+    let initial_termination_time =
+        match xsd_types::types::Duration::from_str(PULL_SUBSCRIPTION_TIMEOUT) {
+            Ok(duration) => Some(schema::b_2::AbsoluteOrRelativeTimeType::Duration(duration)),
+            Err(_) => None,
+        };
+
     let request = CreatePullPointSubscription {
-        initial_termination_time: None,
+        initial_termination_time,
         filter: None,
         subscription_policy: None,
     };
