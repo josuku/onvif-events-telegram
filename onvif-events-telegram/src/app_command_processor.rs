@@ -64,7 +64,13 @@ impl AppCommandProcessor {
         _ = self
             .notifier
             .send_picture_message(
-                &make_caption("Snapshot", &camera.name, &chrono::Utc::now(), None),
+                &make_caption(
+                    "Snapshot",
+                    &camera.name,
+                    &chrono::Utc::now(),
+                    None,
+                    &Vec::new(),
+                ),
                 snapshot.clone(),
                 chat_id,
             )

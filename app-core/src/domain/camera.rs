@@ -1,4 +1,4 @@
-use crate::{CameraId, ChatId, traits::camera_client::CameraClient};
+use crate::{CameraId, ChatId, domain::object::Object, traits::camera_client::CameraClient};
 use chrono::{DateTime, Utc};
 use std::{fmt, sync::Arc};
 
@@ -27,7 +27,7 @@ pub struct CameraEvent {
     pub timestamp: DateTime<Utc>,
     pub camera: CameraData,
     pub snapshot: Vec<u8>, // TODO try with Arc<Vec<u8>> less memory
-                           // pub detections: Vec<Detection>, // TODO when implement yolo object detection
+    pub objects: Vec<Object>,
 }
 
 #[derive(Clone)]

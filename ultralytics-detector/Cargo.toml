@@ -1,0 +1,17 @@
+[package]
+name = "ultralitics-detector"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.86"
+# chrono = "0.4.38"
+# tokio = { version = "1" }
+tracing = "0.1"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+ultralytics-inference = "0.0.33"
+image = "0.25"
+
+app-core = { path = "../app-core" }
+tempfile = "3.27.0"
+

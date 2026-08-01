@@ -1,3 +1,6 @@
 telegram:
   bot_token: <replace-by-your-token>
   user_ids: [<comma-separated-telegram-permited-user-ids>]
+detector:
+  enable: true
+  min_confidence: 0.5

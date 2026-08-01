@@ -1,4 +1,4 @@
-use crate::domain::camera::CameraEventType;
+use crate::domain::{camera::CameraEventType, object::Object};
 use tracing::debug;
 
 pub mod domain;
@@ -14,26 +14,33 @@ pub fn make_caption(
     name: &str,
     time: &chrono::DateTime<chrono::Utc>,
     event_type: Option<CameraEventType>,
+    objects: &[Object],
 ) -> String {
     let converted: chrono::DateTime<chrono::Local> = chrono::DateTime::from(*time);
     debug!("utc:{} local:{}", time, converted);
 
     if let Some(event_type) = event_type {
-        caption_with_type(title, name, &converted, event_type)
+        caption_with_type(title, name, &converted, event_type, objects)
     } else {
-        caption_without_type(title, name, &converted)
+        caption_without_type(title, name, &converted, objects)
     }
 }
 
-fn caption_without_type(title: &str, name: &str, time: &chrono::DateTime<chrono::Local>) -> String {
+fn caption_without_type(
+    title: &str,
+    name: &str,
+    time: &chrono::DateTime<chrono::Local>,
+    objects: &[Object],
+) -> String {
     format!(
         r#"
 {}
 Camera: {}
-Time: {}"#,
+Time: {}{}"#,
         title.to_uppercase(),
         name,
-        time
+        time,
+        format_objects(objects),
     )
 }
 
@@ -42,16 +49,32 @@ fn caption_with_type(
     name: &str,
     time: &chrono::DateTime<chrono::Local>,
     event_type: CameraEventType,
+    objects: &[Object],
 ) -> String {
     format!(
         r#"
 {}
 Camera: {}
 Type: {}
-Time: {}"#,
+Time: {}{}"#,
         title.to_uppercase(),
         name,
         event_type,
-        time
+        time,
+        format_objects(objects),
     )
+}
+
+fn format_objects(objects: &[Object]) -> String {
+    if objects.is_empty() {
+        String::new()
+    } else {
+        let objects = objects
+            .iter()
+            .map(|o| format!("• {}", o))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!("\nObjects:\n{}", objects)
+    }
 }

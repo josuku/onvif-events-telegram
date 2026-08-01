@@ -9,6 +9,7 @@ use crate::daily_report::manage_daily_report;
 use crate::detection_checker::check_for_detections_in_cameras;
 use crate::subscription_manager::{close_subscriptions, renew_subscriptions};
 use app_core::domain::event_bus::EventBus;
+use app_core::traits::object_detector::ObjectDetector;
 use app_core::traits::{command_processor::CommandProcessor, notifier::Notifier};
 use config::AppConfig;
 use repository::db_store::DbStore;
@@ -16,10 +17,12 @@ use repository::memory_repository::MemoryRepository;
 use std::fs::OpenOptions;
 use std::{process::exit, sync::Arc};
 use telegram::{telegram_bot::TelegramBot, telegram_notifier::TelegramNotifier};
+use tokio::sync::Mutex;
 use tokio::{select, signal};
 use tracing::{error, info};
 use tracing_appender::non_blocking;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use ultralitics_detector::UltralyticsDetector;
 
 const DEFAULT_POLLING_SECONDS: u64 = 1;
 const DEFAULT_BETWEEN_SECONDS: u64 = 15;
@@ -56,6 +59,15 @@ async fn main() {
         notifier.clone(),
     ));
 
+    let object_detector: Option<Arc<Mutex<dyn ObjectDetector>>> = if config.detector.enable {
+        Some(Arc::new(Mutex::new(
+            UltralyticsDetector::new("./models/yolo11n.onnx", config.detector.min_confidence)
+                .expect("cannot create object detector"),
+        )))
+    } else {
+        None
+    };
+
     let telegram_bot = Arc::new(TelegramBot::new(
         config.telegram.bot_token.clone(),
         config.telegram.user_ids.clone(),
@@ -66,7 +78,7 @@ async fn main() {
 
     select! {
         _ = start_bot(telegram_bot) => (),
-        _ = start_polling(notifier, repository.clone(), event_bus.clone()) => (),
+        _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector) => (),
         _ = renew_subscriptions(repository.clone()) => (),
         _ = signal::ctrl_c() => {
             close_subscriptions(repository).await;
@@ -93,10 +105,16 @@ async fn start_polling(
     notifier: Arc<dyn Notifier>,
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
+    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
 ) {
     let mut last_polling = chrono::Local::now();
     loop {
-        check_for_detections_in_cameras(repository.clone(), event_bus.clone()).await;
+        check_for_detections_in_cameras(
+            repository.clone(),
+            event_bus.clone(),
+            object_detector.clone(),
+        )
+        .await;
         manage_daily_report(notifier.clone(), repository.clone(), last_polling).await;
 
         last_polling = chrono::Local::now();

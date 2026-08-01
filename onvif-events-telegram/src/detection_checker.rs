@@ -1,15 +1,21 @@
-use app_core::domain::{
-    camera::{CameraData, CameraEvent},
-    event_bus::EventBus,
+use app_core::{
+    domain::{
+        camera::{CameraData, CameraEvent},
+        event_bus::EventBus,
+    },
+    traits::object_detector::ObjectDetector,
 };
+use itertools::Itertools;
 use onvif::onvif_camera_client::create_onvif_camera_client;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 pub async fn check_for_detections_in_cameras(
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
+    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
 ) {
     let now = chrono::Utc::now();
     let cameras = repository.get_cameras().await;
@@ -20,8 +26,9 @@ pub async fn check_for_detections_in_cameras(
         .map(|camera| {
             let repository = repository.clone();
             let event_bus = event_bus.clone();
+            let object_detector = object_detector.clone();
             tokio::spawn(async move {
-                check_camera(camera, repository, event_bus, now).await;
+                check_camera(camera, repository, event_bus, now, object_detector).await;
             })
         })
         .collect();
@@ -38,6 +45,7 @@ async fn check_camera(
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
     now: chrono::DateTime<chrono::Utc>,
+    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
 ) {
     let onvif_event = match camera.client.get_event_message().await {
         Ok(Some(event)) => event,
@@ -78,13 +86,25 @@ async fn check_camera(
         }
     };
 
-    // TODO add yolo object detection over snapshot
+    let objects = if let Some(object_detector) = object_detector {
+        let mut object_detector = object_detector.lock().await;
+        match object_detector.detect(&snapshot) {
+            Ok(objects) => objects,
+            Err(err) => {
+                error!("error detecting objects:{}", err);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     event_bus.publish(CameraEvent {
         r#type: onvif_event.r#type,
         timestamp: onvif_event.timestamp,
         camera: camera.clone(),
         snapshot,
+        objects: objects.clone(),
     });
 
     // TODO DO IN REPOSITORY
@@ -93,7 +113,10 @@ async fn check_camera(
         .await;
 
     info!(
-        "{} - new detection in camera:{} type:{}",
-        onvif_event.timestamp, camera.name, onvif_event.r#type
+        "{} - new detection in camera:{} type:{} objects:{}",
+        onvif_event.timestamp,
+        camera.name,
+        onvif_event.r#type,
+        objects.iter().map(|o| format!("{o}")).join(", ")
     );
 }

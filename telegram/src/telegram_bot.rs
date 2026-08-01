@@ -104,6 +104,7 @@ impl TelegramBot {
                             &event.camera.name,
                             &event.timestamp,
                             Some(event.r#type),
+                            &event.objects,
                         ),
                         event.snapshot.clone(),
                         event.camera.subscriptors.clone(),

@@ -20,3 +20,5 @@ app-core = { path = "../app-core" }
 onvif = { path = "../onvif" }
 repository = { path = "../repository" }
 telegram = { path = "../telegram" }
+ultralitics-detector = { path = "../ultralytics-detector"}
+itertools = "0.15.0"

@@ -23,7 +23,19 @@ Service is made using onvif-rs and a modified version of rustygram crate to perm
    $ cargo run config.yaml
 ```
 
+## Yolo object detection prerequisites
 
+Ultralytics detector needs onnx runtime libs to work. Runtime needed files (1.28.0) are loaded from runtime folder on build stage (onvif-events-telegram/build.rs) and downloaded from:
+https://github.com/microsoft/onnxruntime/releases
+
+### Yolo model manual download and conversion to onnx
+
+```console
+   $ pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu12  # maybe not required
+   $ pip install -U ultralytic
+   $ yolo predict model=yolo11n.pt source=https://ultralytics.com/images/bus.jpg       # download model
+   $ yolo export model=yolo11n.pt format=onnx
+```
 
 TODOs
 
@@ -32,6 +44,5 @@ TODOs
 - add getvideo command indicating camera and number or seconds or minutes
 - add zoom in-out command if possible (for varifocal)
 - add Dockerfile (check if existing is valid)
-- add yolo to pipeline to detect persons-animals-objects
 - save detections in postgres and pictures in a folder (in future must have a cleanup process)
 - make a frontend to be able to check pictures with data, and search by date, camera or object
