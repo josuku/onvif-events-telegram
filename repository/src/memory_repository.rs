@@ -1,7 +1,10 @@
 use anyhow::bail;
 use app_core::{
     CameraId, ChatId,
-    domain::{camera::CameraData, discovery_device::DiscoveryDevice},
+    domain::{
+        camera::{CameraConnectionData, CameraData},
+        discovery_device::DiscoveryDevice,
+    },
 };
 use chrono::Utc;
 use onvif::onvif_camera_client::create_onvif_camera_client;
@@ -283,22 +286,17 @@ impl MemoryRepository {
     pub async fn update_uri_from_camera(
         &self,
         camera_id: CameraId,
-        uri: &str,
+        new_uri: &str,
+        prev_conn_data: CameraConnectionData,
     ) -> anyhow::Result<()> {
-        let mut cameras = self.cameras.lock().await;
-        match cameras.get_mut(&camera_id) {
-            Some(camera) => {
-                let client = create_onvif_camera_client(
-                    uri,
-                    &camera.client.get_connection_data().username,
-                    &camera.client.get_connection_data().password,
-                )
+        let new_client =
+            create_onvif_camera_client(new_uri, &prev_conn_data.username, &prev_conn_data.password)
                 .await
                 .map_err(|err| anyhow::anyhow!({ err }))?;
-                camera.client = Arc::new(client);
-            }
-            None => bail!("cannot find camera {} to replace uri", camera_id),
-        }
+
+        self.replace_camera_client(camera_id, Arc::new(new_client))
+            .await?;
+
         Ok(())
     }
 
@@ -324,15 +322,33 @@ impl MemoryRepository {
     pub async fn replace_camera_client(
         &self,
         camera_id: CameraId,
-        camera_client: Arc<dyn CameraClient>,
+        new_client: Arc<dyn CameraClient>,
     ) -> anyhow::Result<()> {
         let mut cameras = self.cameras.lock().await;
-        match cameras.get_mut(&camera_id) {
+        let old_client = match cameras.get_mut(&camera_id) {
             Some(camera) => {
-                camera.client = camera_client;
+                tracing::info!(
+                    "UPDATING camera:{} from ip:{} to ip:{}",
+                    camera_id,
+                    camera.client.get_connection_data().uri,
+                    new_client.get_connection_data().uri
+                );
+                if camera.client.get_connection_data() == new_client.get_connection_data() {
+                    tracing::warn!(
+                        "trying to replace camera client with same data for camera {}",
+                        camera_id
+                    );
+                    return Ok(());
+                }
+                let old_client = camera.client.clone();
+                camera.client = new_client.clone();
+                self.repo_store
+                    .update_uri_from_camera(camera_id, &new_client.get_connection_data().uri);
+                old_client
             }
             None => bail!("cannot find camera {} to replace camera client", camera_id),
-        }
+        };
+        let _ = old_client.unsubscribe().await;
         Ok(())
     }
 
@@ -416,7 +432,9 @@ impl MemoryRepository {
                         "Updating host of camera:{} -> prev:{} new:{}",
                         camera.id, prev_conn_data.uri, new_url
                     );
-                    let _ = self.update_uri_from_camera(camera.id, &new_uri).await;
+                    let _ = self
+                        .update_uri_from_camera(camera.id, &new_uri, prev_conn_data)
+                        .await;
 
                     if let Some(snapshot_uri) = &camera.snapshot_uri
                         && let Ok(prev_url) = Url::parse(snapshot_uri)

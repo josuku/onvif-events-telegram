@@ -1,9 +1,7 @@
 use app_core::{
-    domain::{
-        camera::{CameraData, CameraEvent},
-        event_bus::EventBus,
-    },
+    domain::{camera::CameraEvent, event_bus::EventBus},
     traits::object_detector::ObjectDetector,
+    CameraId,
 };
 use itertools::Itertools;
 use onvif::onvif_camera_client::create_onvif_camera_client;
@@ -28,7 +26,7 @@ pub async fn check_for_detections_in_cameras(
             let event_bus = event_bus.clone();
             let object_detector = object_detector.clone();
             tokio::spawn(async move {
-                check_camera(camera, repository, event_bus, now, object_detector).await;
+                check_camera(camera.id, repository, event_bus, now, object_detector).await;
             })
         })
         .collect();
@@ -41,18 +39,40 @@ pub async fn check_for_detections_in_cameras(
 }
 
 async fn check_camera(
-    camera: CameraData,
+    camera_id: CameraId,
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
     now: chrono::DateTime<chrono::Utc>,
     object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
 ) {
+    let mut camera = match repository.get_camera(camera_id).await {
+        Some(camera) => camera,
+        None => {
+            tracing::error!("camera with id {} not found", camera_id);
+            return;
+        }
+    };
+
+    tracing::info!(
+        "check_camera: {:?}",
+        camera.client.get_connection_data().uri
+    );
     let onvif_event = match camera.client.get_event_message().await {
         Ok(Some(event)) => event,
         Ok(None) => return,
         Err(err) => {
             error!("error getting pull message. error:{}", err);
             camera.client.unsubscribe().await;
+
+            // updated camera, error can appear after many seconds
+            camera = match repository.get_camera(camera_id).await {
+                Some(camera) => camera,
+                None => {
+                    tracing::error!("camera with id {} not found", camera_id);
+                    return;
+                }
+            };
+
             let conn_data = camera.client.get_connection_data();
             match create_onvif_camera_client(
                 &conn_data.uri,

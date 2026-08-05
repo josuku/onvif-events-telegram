@@ -30,7 +30,7 @@ pub struct CameraEvent {
     pub objects: Vec<Object>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CameraConnectionData {
     pub uri: String,
     pub username: String,
