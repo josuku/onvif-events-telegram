@@ -19,7 +19,7 @@ pub async fn manage_daily_report(
         for camera in repository.get_sorted_cameras().await {
             let notifications = repository.get_today_camera_notifications(camera.id).await;
             let mut status = "";
-            if !camera.client.connected() {
+            if !camera.onvif_client.connected() {
                 status = "\n (disconnected)";
             }
             let mut last_sync = "".to_string();

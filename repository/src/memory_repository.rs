@@ -7,14 +7,14 @@ use app_core::{
     },
 };
 use chrono::Utc;
-use onvif::onvif_camera_client::create_onvif_camera_client;
+use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use url::Url;
 
 use super::db_store::DbStore;
-use app_core::traits::camera_client::CameraClient;
+use app_core::traits::onvif_camera_client::OnvifCameraClient;
 
 pub struct MemoryRepository {
     cameras: Mutex<HashMap<CameraId, CameraData>>,
@@ -62,7 +62,8 @@ impl MemoryRepository {
                 name: camera.name,
                 address: camera.address,
                 snapshot_uri: camera.snapshot_uri,
-                client: Arc::new(client),
+                onvif_client: Arc::new(client),
+                api_camera_client: None, // TODO
                 subscriptors: Vec::new(),
             })
             .await?;
@@ -189,7 +190,7 @@ impl MemoryRepository {
             match self.repo_store.insert_camera(
                 &camera.name,
                 &camera.address,
-                &camera.client.get_connection_data(),
+                &camera.onvif_client.get_connection_data(),
                 &camera.snapshot_uri,
             ) {
                 Ok(id) => id,
@@ -303,14 +304,14 @@ impl MemoryRepository {
     pub async fn update_camera_credentials(
         &self,
         camera_id: CameraId,
-        client: Arc<dyn CameraClient>,
+        client: Arc<dyn OnvifCameraClient>,
         username: &str,
         password: &str,
     ) -> anyhow::Result<()> {
         let mut cameras = self.cameras.lock().await;
         match cameras.get_mut(&camera_id) {
             Some(camera) => {
-                camera.client = client;
+                camera.onvif_client = client;
                 self.repo_store
                     .update_credentials_from_camera(camera_id, username, password);
             }
@@ -322,7 +323,7 @@ impl MemoryRepository {
     pub async fn replace_camera_client(
         &self,
         camera_id: CameraId,
-        new_client: Arc<dyn CameraClient>,
+        new_client: Arc<dyn OnvifCameraClient>,
     ) -> anyhow::Result<()> {
         let mut cameras = self.cameras.lock().await;
         let old_client = match cameras.get_mut(&camera_id) {
@@ -330,18 +331,18 @@ impl MemoryRepository {
                 tracing::info!(
                     "UPDATING camera:{} from ip:{} to ip:{}",
                     camera_id,
-                    camera.client.get_connection_data().uri,
+                    camera.onvif_client.get_connection_data().uri,
                     new_client.get_connection_data().uri
                 );
-                if camera.client.get_connection_data() == new_client.get_connection_data() {
+                if camera.onvif_client.get_connection_data() == new_client.get_connection_data() {
                     tracing::warn!(
                         "trying to replace camera client with same data for camera {}",
                         camera_id
                     );
                     return Ok(());
                 }
-                let old_client = camera.client.clone();
-                camera.client = new_client.clone();
+                let old_client = camera.onvif_client.clone();
+                camera.onvif_client = new_client.clone();
                 self.repo_store
                     .update_uri_from_camera(camera_id, &new_client.get_connection_data().uri);
                 old_client
@@ -384,7 +385,7 @@ impl MemoryRepository {
 
             if !current_cameras.iter().any(|camera| {
                 camera.address == new_device.address
-                    || camera.client.get_connection_data().uri == new_uri
+                    || camera.onvif_client.get_connection_data().uri == new_uri
             }) {
                 // TODO user-pass empty by default
                 let mut client = create_onvif_camera_client(&new_uri, "", "")
@@ -410,7 +411,8 @@ impl MemoryRepository {
                         name: new_device.name.clone().unwrap_or_default(),
                         address: new_device.address.clone(),
                         snapshot_uri,
-                        client: Arc::new(client),
+                        onvif_client: Arc::new(client),
+                        api_camera_client: None, // TODO
                         subscriptors: Vec::new(),
                     })
                     .await
@@ -418,7 +420,8 @@ impl MemoryRepository {
                     bail!("{}", err);
                 }
             } else if let Some(camera) = current_cameras.iter().find(|cam| {
-                cam.address == new_device.address || cam.client.get_connection_data().uri == new_uri
+                cam.address == new_device.address
+                    || cam.onvif_client.get_connection_data().uri == new_uri
             }) && let Some(new_url) = new_device.urls.first()
             {
                 warn!(
@@ -426,7 +429,7 @@ impl MemoryRepository {
                     new_device.address, new_uri
                 );
 
-                let prev_conn_data = camera.client.get_connection_data();
+                let prev_conn_data = camera.onvif_client.get_connection_data();
                 if prev_conn_data.uri != new_uri {
                     warn!(
                         "Updating host of camera:{} -> prev:{} new:{}",

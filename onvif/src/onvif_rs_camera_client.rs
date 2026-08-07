@@ -1,11 +1,11 @@
-use super::onvif_service_clients::{get_snapshot_uris, OnvifServiceClients};
-use crate::onvif_service_clients::{
+use super::onvif_rs_service_clients::{get_snapshot_uris, OnvifRsServiceClients};
+use crate::onvif_rs_service_clients::{
     create_default_user, get_users, DEFAULT_PASSWORD, DEFAULT_USERNAME,
 };
 use anyhow::bail;
 use app_core::{
     domain::camera::{CameraConnectionData, CameraEventType, OnvifCameraEvent},
-    traits::camera_client::CameraClient,
+    traits::onvif_camera_client::OnvifCameraClient,
 };
 use async_trait::async_trait;
 use diqwest::{DigestAuthSession, WithDigestAuth};
@@ -22,9 +22,9 @@ use url::Url;
 
 pub const PULL_SUBSCRIPTION_TIMEOUT: &str = "PT30M"; // 30 minutes
 
-pub struct OnvifCameraClient {
+pub struct OnvifRsCameraClient {
     conn_data: CameraConnectionData,
-    clients: Option<OnvifServiceClients>,
+    clients: Option<OnvifRsServiceClients>,
     event_subscription: Option<SoapClient>,
     snapshot_uri: Option<String>,
     snapshot_requires_auth: bool,
@@ -32,7 +32,7 @@ pub struct OnvifCameraClient {
     digest_session: Option<Arc<Mutex<DigestAuthSession>>>,
 }
 
-impl OnvifCameraClient {
+impl OnvifRsCameraClient {
     pub async fn new(uri: &str, username: &str, password: &str) -> Result<Self, String> {
         let conn_data = CameraConnectionData {
             uri: uri.to_string(),
@@ -168,7 +168,7 @@ impl OnvifCameraClient {
 }
 
 #[async_trait]
-impl CameraClient for OnvifCameraClient {
+impl OnvifCameraClient for OnvifRsCameraClient {
     async fn snapshot(&self) -> anyhow::Result<Vec<u8>> {
         if let Some(snapshot_uri) = &self.snapshot_uri {
             let t0 = std::time::Instant::now();
@@ -304,8 +304,8 @@ pub async fn create_onvif_camera_client(
     uri: &str,
     username: &str,
     password: &str,
-) -> anyhow::Result<OnvifCameraClient> {
-    let mut client = match OnvifCameraClient::new(uri, username, password).await {
+) -> anyhow::Result<OnvifRsCameraClient> {
+    let mut client = match OnvifRsCameraClient::new(uri, username, password).await {
         Ok(cli) => cli,
         Err(err) => {
             bail!(
@@ -320,8 +320,8 @@ pub async fn create_onvif_camera_client(
     Ok(client)
 }
 
-async fn create_onvif_clients(conn_data: &CameraConnectionData) -> Option<OnvifServiceClients> {
-    match OnvifServiceClients::new(
+async fn create_onvif_clients(conn_data: &CameraConnectionData) -> Option<OnvifRsServiceClients> {
+    match OnvifRsServiceClients::new(
         &conn_data.uri,
         Some(&conn_data.username),
         Some(&conn_data.password),

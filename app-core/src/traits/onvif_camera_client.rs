@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::domain::camera::{CameraConnectionData, OnvifCameraEvent};
 
 #[async_trait]
-pub trait CameraClient: Send + Sync {
+pub trait OnvifCameraClient: Send + Sync {
     async fn get_snapshot_uri(&self) -> anyhow::Result<String>;
     async fn snapshot(&self) -> anyhow::Result<Vec<u8>>;
     async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>>;

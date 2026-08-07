@@ -1,15 +1,15 @@
 use app_core::domain::camera::CameraData;
 use app_core::helpers::network::is_reachable;
-use app_core::traits::camera_client::CameraClient;
-use app_core::traits::discovery_client::DiscoveryClient;
+use app_core::traits::discovery_client::OnvifRsDiscoveryClient;
+use app_core::traits::onvif_camera_client::OnvifCameraClient;
 use app_core::{
     make_caption,
     traits::{command_processor::CommandProcessor, notifier::Notifier},
     CameraId, ChatId,
 };
 use async_trait::async_trait;
-use onvif::onvif_camera_client::create_onvif_camera_client;
-use onvif::onvif_discovery_client::OnvifDiscoveryClient;
+use onvif::onvif_rs_camera_client::create_onvif_camera_client;
+use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -49,7 +49,7 @@ impl AppCommandProcessor {
             }
         };
 
-        let snapshot = match camera.client.snapshot().await {
+        let snapshot = match camera.onvif_client.snapshot().await {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let error = format!(
@@ -111,7 +111,7 @@ impl CommandProcessor for AppCommandProcessor {
             cameras.sort_by_key(|a| a.id);
             let mut lines = vec!["Available cameras:".to_string()];
             for camera in cameras {
-                let reachable = is_reachable(&camera.client.get_connection_data().uri).await;
+                let reachable = is_reachable(&camera.onvif_client.get_connection_data().uri).await;
                 let status = if reachable { "🟢" } else { "🔴" };
                 lines.push(format!("{status} {camera}"));
             }
@@ -275,9 +275,9 @@ impl CommandProcessor for AppCommandProcessor {
 
         if let Some(snapshot_uri) = camera.snapshot_uri {
             match camera
-                .client
+                .onvif_client
                 .create_user_and_fix_snapshot_uri(
-                    &camera.client.get_connection_data().uri,
+                    &camera.onvif_client.get_connection_data().uri,
                     &snapshot_uri,
                 )
                 .await
@@ -310,7 +310,7 @@ impl CommandProcessor for AppCommandProcessor {
                 }
             }
         } else {
-            match camera.client.get_snapshot_uri().await {
+            match camera.onvif_client.get_snapshot_uri().await {
                 Ok(uri) => {
                     match self
                         .repository
@@ -393,7 +393,8 @@ impl CommandProcessor for AppCommandProcessor {
                 name: uri.to_string(),
                 address: uri.to_string(),
                 snapshot_uri,
-                client: Arc::new(client),
+                onvif_client: Arc::new(client),
+                api_camera_client: None, // TODO
                 subscriptors: Vec::new(),
             })
             .await
@@ -451,7 +452,7 @@ impl CommandProcessor for AppCommandProcessor {
         );
 
         let uri = match self.repository.get_camera(camera_id).await {
-            Some(camera) => camera.client.get_connection_data().uri,
+            Some(camera) => camera.onvif_client.get_connection_data().uri,
             None => {
                 let error = format!("camera {} not found", camera_id);
                 self.print_and_send_error(&error, chat_id).await;

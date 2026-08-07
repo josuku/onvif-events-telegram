@@ -1,4 +1,8 @@
-use crate::{CameraId, ChatId, domain::object::Object, traits::camera_client::CameraClient};
+use crate::{
+    CameraId, ChatId,
+    domain::object::Object,
+    traits::{api_camera_client::ApiCameraClient, onvif_camera_client::OnvifCameraClient},
+};
 use chrono::{DateTime, Utc};
 use std::{fmt, sync::Arc};
 
@@ -43,12 +47,13 @@ pub struct CameraData {
     pub name: String,
     pub address: String,
     pub snapshot_uri: Option<String>,
-    pub client: Arc<dyn CameraClient>,
+    pub onvif_client: Arc<dyn OnvifCameraClient>,
+    pub api_camera_client: Option<Arc<dyn ApiCameraClient>>,
     pub subscriptors: Vec<ChatId>,
 }
 impl fmt::Display for CameraData {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let conn_data = self.client.get_connection_data();
+        let conn_data = self.onvif_client.get_connection_data();
         write!(
             f,
             r#"Camera {}
@@ -67,4 +72,12 @@ impl fmt::Display for CameraData {
             self.subscriptors.len(),
         )
     }
+}
+
+#[derive(Clone)]
+pub struct Recording {
+    pub name: String,
+    pub size_mb: f64,
+    pub begin: String,
+    pub end: String,
 }

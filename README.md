@@ -38,7 +38,8 @@ https://github.com/microsoft/onnxruntime/releases
 ```
 
 TODOs
-
+- get camera info and available onvif services
+- add recording download feature using camera api (if available) (needs ffmpeg to convert video result)
 - save polling and between timeouts in SQLite
 - reboot camera command (maybe indicate if polling has errors)
 - add getvideo command indicating camera and number or seconds or minutes

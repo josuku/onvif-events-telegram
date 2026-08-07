@@ -4,7 +4,7 @@ use app_core::{
     CameraId,
 };
 use itertools::Itertools;
-use onvif::onvif_camera_client::create_onvif_camera_client;
+use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -55,14 +55,14 @@ async fn check_camera(
 
     tracing::info!(
         "check_camera: {:?}",
-        camera.client.get_connection_data().uri
+        camera.onvif_client.get_connection_data().uri
     );
-    let onvif_event = match camera.client.get_event_message().await {
+    let onvif_event = match camera.onvif_client.get_event_message().await {
         Ok(Some(event)) => event,
         Ok(None) => return,
         Err(err) => {
             error!("error getting pull message. error:{}", err);
-            camera.client.unsubscribe().await;
+            camera.onvif_client.unsubscribe().await;
 
             // updated camera, error can appear after many seconds
             camera = match repository.get_camera(camera_id).await {
@@ -73,7 +73,7 @@ async fn check_camera(
                 }
             };
 
-            let conn_data = camera.client.get_connection_data();
+            let conn_data = camera.onvif_client.get_connection_data();
             match create_onvif_camera_client(
                 &conn_data.uri,
                 &conn_data.username,
@@ -95,7 +95,7 @@ async fn check_camera(
         }
     };
 
-    let snapshot = match camera.client.snapshot().await {
+    let snapshot = match camera.onvif_client.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             error!(

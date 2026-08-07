@@ -12,7 +12,7 @@ use url::Url;
 pub const DEFAULT_USERNAME: &str = "oet1";
 pub const DEFAULT_PASSWORD: &str = "oet12345";
 
-pub struct OnvifServiceClients {
+pub struct OnvifRsServiceClients {
     pub devicemgmt: soap::client::Client,
     pub event: Option<soap::client::Client>,
     pub deviceio: Option<soap::client::Client>,
@@ -23,7 +23,7 @@ pub struct OnvifServiceClients {
     pub analytics: Option<soap::client::Client>,
 }
 
-impl OnvifServiceClients {
+impl OnvifRsServiceClients {
     pub async fn new(
         uri: &str,
         username: Option<&str>,

@@ -1,4 +1,4 @@
-use app_core::traits::discovery_client::DiscoveryClient;
+use app_core::traits::discovery_client::OnvifRsDiscoveryClient;
 use app_core::{
     domain::discovery_device::DiscoveryDevice, helpers::network::get_primary_ipv4_address,
 };
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 pub struct OnvifDiscoveryClient {}
 
 #[async_trait]
-impl DiscoveryClient for OnvifDiscoveryClient {
+impl OnvifRsDiscoveryClient for OnvifDiscoveryClient {
     async fn camera_discovery() -> Vec<DiscoveryDevice> {
         let ipv4 = match get_primary_ipv4_address() {
             Ok(ip) => ip,
