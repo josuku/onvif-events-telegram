@@ -1,9 +1,11 @@
+use std::path::Path;
+
 use app_core::{domain::camera::Recording, traits::api_camera_client::ApiCameraClient};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
 
-use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, get_clip_interval};
+use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, get_clip_interval, run_ffmpeg};
 
 // Implementation for XMEye-icSEE compatible chinese cameras. DvrIp is the protocol they use
 
@@ -13,10 +15,28 @@ pub struct DvrIpXmeyeApiCameraClient {
     password: String,
 }
 
+fn normalize_host_for_xmeye(host: &str) -> String {
+    let without_scheme = host
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    without_scheme
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme)
+        .to_string()
+}
+
 impl DvrIpXmeyeApiCameraClient {
     pub fn new(host: String, user: String, password: String) -> Self {
+        let normalized_host = normalize_host_for_xmeye(&host);
+        tracing::info!(
+            "created new DvrIpXmeyeApiCameraClient in host: {} and username: {}",
+            normalized_host,
+            user
+        );
+
         Self {
-            host,
+            host: normalized_host,
             user,
             password,
         }
@@ -101,10 +121,9 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
 
     async fn download_recording(
         &self,
-        _recording: &Recording,
+        recording: &Recording,
         time: DateTime<Utc>,
         clip_time: Duration,
-        source_name: String,
         target_name: String,
     ) -> anyhow::Result<String> {
         let (start_time, end_time) = get_clip_interval(time, clip_time);
@@ -116,24 +135,100 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
         }
 
         let mut cam = self.connect_and_login().await?;
+        tracing::info!("download_recording -> connected to XMEye camera");
 
-        tracing::info!("Downloading file to '{target_name}' (this may take time)...");
+        let target_name_with_extension = format!("./{target_name}.h265x");
 
         let result = cam
             .download_file(
                 chrono::DateTime::from(start_time),
                 chrono::DateTime::from(end_time),
-                &source_name,
-                &target_name,
+                &recording.name,
+                &target_name_with_extension,
             )
             .await;
-        cam.close().await?;
+        tracing::info!(
+            "download_recording -> file {target_name_with_extension:?} downloaded from camera"
+        );
 
-        // TODO reencode with ffmpeg if needed
+        cam.close().await?;
 
         if let Err(err) = result {
             anyhow::bail!("Download failed: {:?}", err)
         }
-        Ok(target_name)
+
+        let output_file = format!("./{target_name}.mp4");
+        if let Err(err) = ffmpeg_convert_h265(
+            Path::new(&target_name_with_extension),
+            Path::new(&output_file),
+        )
+        .await
+        {
+            tracing::error!("Error with ffmpeg or not installed: {:?}", err);
+            Ok(target_name_with_extension)
+        } else {
+            tracing::info!(
+                "file {output_file:?} succesfully codified with ffmpeg. deleting original file:{target_name_with_extension:?}"
+            );
+            tokio::fs::remove_file(&target_name_with_extension)
+                .await
+                .ok();
+            Ok(output_file)
+        }
     }
+}
+
+async fn ffmpeg_convert_h265(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let fast_result = run_ffmpeg(&[
+        "-f",
+        "hevc",
+        "-i",
+        input.to_str().unwrap(),
+        "-c",
+        "copy",
+        "-tag:v",
+        "hvc1",
+        "-movflags",
+        "+faststart",
+        "-y",
+        output.to_str().unwrap(),
+    ])
+    .await;
+
+    let fast_ok = fast_result.is_ok()
+        && tokio::fs::metadata(output)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+
+    if fast_ok {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "error doing fast HEVC remux HEVC ({:?}), trying to decoding to H264 as fallback",
+        fast_result.err()
+    );
+
+    run_ffmpeg(&[
+        "-f",
+        "hevc",
+        "-i",
+        input.to_str().unwrap(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        "-movflags",
+        "+faststart",
+        "-y",
+        output.to_str().unwrap(),
+    ])
+    .await
 }

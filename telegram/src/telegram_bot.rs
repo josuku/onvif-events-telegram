@@ -330,6 +330,7 @@ async fn process_callback(
         "⏳ Downloading...".to_string(),
         teloxide_chat_id,
         message_id,
+        None,
     )
     .await;
 
@@ -345,6 +346,7 @@ async fn process_callback(
                     "✅ Downloaded".to_string(),
                     teloxide_chat_id,
                     message_id,
+                    callback.data,
                 )
                 .await
             }
@@ -354,6 +356,7 @@ async fn process_callback(
                     format!("❌ {err}"),
                     teloxide_chat_id,
                     message_id,
+                    callback.data,
                 )
                 .await;
                 error!("Error getting recording: {err:#}");
@@ -369,10 +372,12 @@ async fn edit_reply_button_message(
     text: String,
     chat_id: teloxide::types::ChatId,
     message_id: teloxide::types::MessageId,
+    callback_string: Option<String>,
 ) {
+    let callback = callback_string.unwrap_or("noop".to_string());
     bot.edit_message_reply_markup(chat_id, message_id)
         .reply_markup(InlineKeyboardMarkup::new(vec![vec![
-            InlineKeyboardButton::callback(text, "noop"),
+            InlineKeyboardButton::callback(text, callback),
         ]]))
         .await
         .ok();

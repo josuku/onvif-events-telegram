@@ -14,7 +14,6 @@ pub trait ApiCameraClient: Send + Sync {
         recording: &Recording,
         time: chrono::DateTime<chrono::Utc>,
         clip_time: chrono::Duration,
-        source_name: String,
         target_name: String,
     ) -> anyhow::Result<String>;
 }

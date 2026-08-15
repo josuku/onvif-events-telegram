@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub detector: DetectorConfig,
     pub default_polling_seconds: u64,
     pub default_between_seconds: u64,
+    pub auto_renewal: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]

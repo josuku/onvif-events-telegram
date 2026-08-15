@@ -562,7 +562,6 @@ impl CommandProcessor for AppCommandProcessor {
                 )
             });
 
-            let source_name = recordings.first().unwrap().name.to_string();
             let target_name = format!(
                 "{}_{}_{}",
                 camera_id,
@@ -574,8 +573,7 @@ impl CommandProcessor for AppCommandProcessor {
                     recordings.first().unwrap(),
                     event_time,
                     clip_time,
-                    source_name,
-                    target_name.clone(),
+                    target_name,
                 )
                 .await
             {
@@ -586,6 +584,7 @@ impl CommandProcessor for AppCommandProcessor {
                         .await
                     {
                         Ok(_) => {
+                            tracing::info!("deleting file {file_path:?} after send");
                             tokio::fs::remove_file(&file_path).await.ok();
                         }
                         Err(err) => {

@@ -76,7 +76,7 @@ async fn main() {
     select! {
         _ = start_bot(telegram_bot) => (),
         _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector) => (),
-        _ = renew_subscriptions(repository.clone()) => (),
+        _ = renew_subscriptions(repository.clone()), if config.auto_renewal => (),
         _ = signal::ctrl_c() => {
             close_subscriptions(repository).await;
             info!("Closing app")

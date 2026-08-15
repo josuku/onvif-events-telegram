@@ -9,7 +9,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use crate::{MAX_DOWNLOAD_SECONDS, get_clip_interval};
+use crate::{MAX_DOWNLOAD_SECONDS, get_clip_interval, run_ffmpeg};
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_DAHUA_SD_DIR: &str = "/mnt/sd";
@@ -22,16 +22,23 @@ pub struct DahuaRpcApiCameraClient {
     password: String,
 }
 
+fn normalize_host_for_dahua(host: &str) -> String {
+    host.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string()
+}
+
 impl DahuaRpcApiCameraClient {
     pub fn new(host: String, user: String, password: String) -> Self {
+        let normalized_host = normalize_host_for_dahua(&host);
         tracing::info!(
             "created new DahuaRpcApiCameraClient in host: {} and username: {}",
-            host,
+            normalized_host,
             user
         );
 
         Self {
-            host,
+            host: normalized_host,
             user,
             password,
         }
@@ -91,37 +98,9 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         recording: &Recording,
         time: DateTime<Utc>,
         clip_time: Duration,
-        source_name: String,
         target_name: String,
     ) -> anyhow::Result<String> {
-        let (start_time, end_time) = get_clip_interval(time, clip_time);
-
-        let local_offset = *time.with_timezone(&Local).offset();
-        let recording_start = parse_dahua_time(&recording.begin, local_offset)
-            .context("cannot parse recording begin time")?;
-        let recording_end = parse_dahua_time(&recording.end, local_offset)
-            .context("cannot parse recording end time")?;
-        let window_start = (time - clip_time).max(recording_start);
-        let window_end = (time + clip_time).min(recording_end);
-        let offset_secs = (window_start - recording_start).num_milliseconds() as f64 / 1000.0;
-        let duration_secs = (window_end - window_start).num_milliseconds() as f64 / 1000.0;
-
-        tracing::info!(
-            "download_recording -> time:{time:?} local_offset:{local_offset:?} recording:{recording_start:?}-{recording_end:?} window:{window_start:?}-{window_end:?} offset:{offset_secs:?} duration:{duration_secs:?}"
-        );
-
-        if window_start >= window_end {
-            anyhow::bail!(
-                "invalid clip window: start={window_start} >= end={window_end} \
-                (event time={time}, recording={recording_start}..{recording_end})"
-            );
-        }
-
-        if (end_time - start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-            anyhow::bail!(
-                "Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way"
-            );
-        }
+        let (offset_secs, duration_secs) = compute_clip_window(recording, time, clip_time)?;
 
         let mut client = self.connect_and_login().await?;
         tracing::info!("download_recording -> connected to Dahua camera");
@@ -129,9 +108,11 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         let target_name_with_extension = format!("./{target_name}.dav");
 
         let result = client
-            .download_recording(&source_name, Path::new(&target_name_with_extension))
+            .download_recording(&recording.name, Path::new(&target_name_with_extension))
             .await;
-        tracing::info!("download_recording -> file downloaded from camera");
+        tracing::info!(
+            "download_recording -> file {target_name_with_extension:?} downloaded from camera"
+        );
 
         client.logout().await.ok();
 
@@ -194,16 +175,11 @@ impl DahuaClient {
             .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
             .build()
             .context("Cannot get download HTTP client")?;
-        let base_url = if host.starts_with("http://") || host.starts_with("https://") {
-            host.to_string()
-        } else {
-            format!("http://{host}")
-        };
 
         Ok(Self {
             http,
             download_http,
-            base_url,
+            base_url: format!("http://{host}"),
             username: username.to_string(),
             password: password.to_string(),
             session: None,
@@ -511,31 +487,94 @@ pub fn get_chosen_recording(
         .map(|(r, _, _)| (*r).clone())
 }
 
+fn compute_clip_window(
+    recording: &Recording,
+    time: DateTime<Utc>,
+    clip_time: Duration,
+) -> anyhow::Result<(f64, f64)> {
+    let (clip_start_time, clip_end_time) = get_clip_interval(time, clip_time);
+
+    if (clip_end_time - clip_start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
+        anyhow::bail!(
+            "Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way"
+        );
+    }
+
+    let local_offset = *time.with_timezone(&Local).offset();
+    let recording_start = parse_dahua_time(&recording.begin, local_offset)
+        .context("cannot parse recording begin time")?;
+    let recording_end = parse_dahua_time(&recording.end, local_offset)
+        .context("cannot parse recording end time")?;
+
+    let desired_start = time - clip_time;
+    let desired_end = time + clip_time;
+    let desired_len = clip_time * 2;
+    let file_len = recording_end - recording_start;
+
+    let (window_start, window_end) = if file_len <= desired_len {
+        (recording_start, recording_end)
+    } else {
+        let mut start = desired_start;
+        let mut end = desired_end;
+
+        if start < recording_start {
+            let shift = recording_start - start;
+            start = recording_start;
+            end += shift;
+        }
+        if end > recording_end {
+            let shift = end - recording_end;
+            end = recording_end;
+            start = (start - shift).max(recording_start);
+        }
+
+        (start, end)
+    };
+
+    if window_start >= window_end {
+        anyhow::bail!(
+            "invalid clip window: start={window_start} >= end={window_end} \
+             (event time={time}, recording={recording_start}..{recording_end})"
+        );
+    }
+
+    let offset_secs = (window_start - recording_start).num_milliseconds() as f64 / 1000.0;
+    let duration_secs = (window_end - window_start).num_milliseconds() as f64 / 1000.0;
+
+    tracing::info!(
+        "download_recording -> time:{time:?} local_offset:{local_offset:?} recording:{recording_start:?}-{recording_end:?} window:{window_start:?}-{window_end:?} offset:{offset_secs:?} duration:{duration_secs:?}"
+    );
+
+    Ok((offset_secs, duration_secs))
+}
+
 async fn ffmpeg_trim_and_convert(
     input: &Path,
     output: &Path,
     offset_secs: f64,
     duration_secs: f64,
 ) -> anyhow::Result<()> {
-    let fast_result = run_ffmpeg(&[
-        "-ss",
-        &offset_secs.to_string(),
-        "-i",
-        input.to_str().unwrap(),
-        "-t",
-        &duration_secs.to_string(),
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "64k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        output.to_str().unwrap(),
-    ])
-    .await;
+    let mut args: Vec<String> = Vec::new();
+    if offset_secs > 0.05 {
+        args.push("-ss".into());
+        args.push(offset_secs.to_string());
+    }
+    args.push("-i".into());
+    args.push(input.to_str().unwrap().into());
+    args.push("-t".into());
+    args.push(duration_secs.to_string());
+    args.push("-c:v".into());
+    args.push("copy".into());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push("64k".into());
+    args.push("-movflags".into());
+    args.push("+faststart".into());
+    args.push("-y".into());
+    args.push(output.to_str().unwrap().into());
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let fast_result = run_ffmpeg(&args_ref).await;
 
     let fast_ok = fast_result.is_ok()
         && tokio::fs::metadata(output)
@@ -548,47 +587,34 @@ async fn ffmpeg_trim_and_convert(
     }
 
     tracing::warn!(
-        "error doing fast remux ({:?}), trying to redecoding as fallback",
+        "error doing fast remux ({:?}), trying to decoding as fallback",
         fast_result.err()
     );
 
-    run_ffmpeg(&[
-        "-ss",
-        &offset_secs.to_string(),
-        "-i",
-        input.to_str().unwrap(),
-        "-t",
-        &duration_secs.to_string(),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "64k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        output.to_str().unwrap(),
-    ])
-    .await
-}
-
-async fn run_ffmpeg(args: &[&str]) -> anyhow::Result<()> {
-    let result = tokio::process::Command::new("ffmpeg")
-        .args(args)
-        .output()
-        .await
-        .context("cannot execute ffmpeg")?;
-
-    if !result.status.success() {
-        anyhow::bail!(
-            "error with ffmpeg: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+    args.clear();
+    if offset_secs > 0.05 {
+        args.push("-ss".into());
+        args.push(offset_secs.to_string());
     }
-    Ok(())
+    args.push("-i".into());
+    args.push(input.to_str().unwrap().into());
+    args.push("-t".into());
+    args.push(duration_secs.to_string());
+    args.push("-c:v".into());
+    args.push("libx264".into());
+    args.push("-preset".into());
+    args.push("veryfast".into());
+    args.push("-crf".into());
+    args.push("23".into());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push("64k".into());
+    args.push("-movflags".into());
+    args.push("+faststart".into());
+    args.push("-y".into());
+    args.push(output.to_str().unwrap().into());
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    run_ffmpeg(&args_ref).await
 }

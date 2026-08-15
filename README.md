@@ -37,13 +37,24 @@ https://github.com/microsoft/onnxruntime/releases
    $ yolo export model=yolo11n.pt format=onnx
 ```
 
+## Recordings download
+
+FFMPEG is needed to decode original videos in mobile compatible formats.
+
+For Windows you can install with:
+```console
+winget search ffmpeg
+winget install BtbN.FFmpeg.LGPL
+```
+
+Or copy ffmpeg.exe in the same directory of the bot .exe file
+
 TODOs
-- retry callback if error downloading
-- add callback button to snapshots
 - get camera info and available onvif services
 - add oxvif implementation for onvif camera client
 - save polling and between timeouts in SQLite
 - reboot camera command (maybe indicate if polling has errors)
+- updated sync state (yellow ball or description)
 - add getvideo command indicating camera and number or seconds or minutes
 - add zoom in-out command if possible (for varifocal)
 - add Dockerfile (check if existing is valid)
