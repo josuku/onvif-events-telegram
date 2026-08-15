@@ -53,7 +53,7 @@ async fn check_camera(
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         "check_camera: {:?}",
         camera.onvif_client.get_connection_data().uri
     );

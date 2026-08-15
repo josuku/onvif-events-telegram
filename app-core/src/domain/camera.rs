@@ -47,6 +47,7 @@ pub struct CameraData {
     pub name: String,
     pub address: String,
     pub snapshot_uri: Option<String>,
+    pub device_info: Option<DeviceInfo>,
     pub onvif_client: Arc<dyn OnvifCameraClient>,
     pub api_camera_client: Option<Arc<dyn ApiCameraClient>>,
     pub subscriptors: Vec<ChatId>,
@@ -80,4 +81,40 @@ pub struct Recording {
     pub size_mb: f64,
     pub begin: String,
     pub end: String,
+}
+
+#[derive(Clone)]
+pub struct DeviceInfo {
+    pub manufacturer: String,
+    pub model: String,
+    pub firmware_version: String,
+    pub serial_number: String,
+}
+
+impl CameraData {
+    pub fn host(&self) -> String {
+        self.onvif_client.get_connection_data().uri
+    }
+
+    pub fn username(&self) -> String {
+        self.onvif_client.get_connection_data().username
+    }
+
+    pub fn password(&self) -> String {
+        self.onvif_client.get_connection_data().password
+    }
+
+    pub async fn device_info(&mut self) -> anyhow::Result<DeviceInfo> {
+        if let Some(device_info) = &self.device_info {
+            return Ok(device_info.clone());
+        }
+
+        match self.onvif_client.get_device_info().await {
+            Ok(info) => {
+                self.device_info = Some(info.clone());
+                Ok(info.clone())
+            }
+            Err(err) => anyhow::bail!("Error getting device info. {}", err),
+        }
+    }
 }

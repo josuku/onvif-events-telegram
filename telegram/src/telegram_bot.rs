@@ -4,13 +4,16 @@ use app_core::{
     traits::{command_processor::CommandProcessor, notifier::Notifier},
     CameraId,
 };
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use teloxide::{
     dispatching::{Dispatcher, HandlerExt, UpdateFilterExt},
     dptree,
-    payloads::SendMessageSetters,
+    payloads::{EditMessageReplyMarkupSetters, SendMessageSetters},
     prelude::Requester,
-    types::{Message, ParseMode, Update},
+    types::{
+        CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ParseMode, Update,
+    },
     utils::command::BotCommands,
     Bot,
 };
@@ -65,18 +68,22 @@ impl TelegramBot {
     }
 
     pub async fn start(&self) {
-        let handler = Update::filter_message()
+        let handler = dptree::entry()
             .branch(
-                dptree::entry()
-                    .filter_command::<BotCommand>()
-                    .endpoint(process_command),
+                Update::filter_message()
+                    .branch(
+                        dptree::entry()
+                            .filter_command::<BotCommand>()
+                            .endpoint(process_command),
+                    )
+                    .branch(
+                        dptree::filter(|msg: Message| {
+                            msg.text().map(|t| t.starts_with('/')).unwrap_or(false)
+                        })
+                        .endpoint(unknown_command),
+                    ),
             )
-            .branch(
-                dptree::filter(|msg: Message| {
-                    msg.text().map(|t| t.starts_with('/')).unwrap_or(false)
-                })
-                .endpoint(unknown_command),
-            );
+            .branch(Update::filter_callback_query().endpoint(process_callback));
 
         self.event_listener();
 
@@ -109,6 +116,7 @@ impl TelegramBot {
                         event.snapshot.clone(),
                         event.camera.subscriptors.clone(),
                         event.camera.id,
+                        &event.timestamp,
                     )
                     .await;
             }
@@ -255,6 +263,119 @@ async fn process_command(
         }
     };
     Ok(())
+}
+
+async fn process_callback(
+    bot: Bot,
+    callback: CallbackQuery,
+    allowed_chat_ids: Vec<String>,
+    command_processor: Arc<dyn CommandProcessor>,
+) -> teloxide::requests::ResponseResult<()> {
+    let Some(message) = &callback.message else {
+        error!("Recordings not found");
+        return Err(anyhow_to_response_error(anyhow::anyhow!(
+            "Recordings not found"
+        )));
+    };
+
+    let chat_id = message.chat().id.0;
+    if !allowed_chat_ids.contains(&format!("{chat_id}")) {
+        let error_msg = format!(
+            "not allowed chat id:{:?} allowed:{:?}",
+            chat_id, allowed_chat_ids
+        );
+        error!("{error_msg}");
+        return Err(anyhow_to_response_error(anyhow::anyhow!(error_msg)));
+    }
+
+    let teloxide_chat_id = message.chat().id;
+    let message_id = message.id();
+
+    let Some(data) = &callback.data else {
+        error!("Recordings not found");
+        return Err(anyhow_to_response_error(anyhow::anyhow!(
+            "Recordings not found"
+        )));
+    };
+
+    let Some(data) = data.strip_prefix("recording|") else {
+        bot.answer_callback_query(callback.id).await?;
+        return Ok(());
+    };
+
+    let (camera_id, time) = match data.split_once('|') {
+        Some((cam, ts_str)) => {
+            let camera_id: CameraId = cam.parse().unwrap_or_default();
+            let time = match DateTime::parse_from_rfc3339(ts_str) {
+                Ok(t) => t.with_timezone(&Utc),
+                Err(e) => {
+                    return Err(anyhow_to_response_error(anyhow::anyhow!(
+                        "invalid timestamp '{ts_str}': {e}"
+                    )))
+                }
+            };
+            (camera_id, time)
+        }
+        None => {
+            error!("Recordings not found. invalid parameters");
+            return Err(anyhow_to_response_error(anyhow::anyhow!(
+                "Recordings not found. invalid parameters"
+            )));
+        }
+    };
+
+    bot.answer_callback_query(callback.id).await?; // inmediate ACK
+    edit_reply_button_message(
+        &bot,
+        "⏳ Downloading...".to_string(),
+        teloxide_chat_id,
+        message_id,
+    )
+    .await;
+
+    let bot_clone = bot.clone();
+    tokio::spawn(async move {
+        match command_processor
+            .download_recording(chat_id, message_id.0, camera_id, time)
+            .await
+        {
+            Ok(_) => {
+                edit_reply_button_message(
+                    &bot_clone,
+                    "✅ Downloaded".to_string(),
+                    teloxide_chat_id,
+                    message_id,
+                )
+                .await
+            }
+            Err(err) => {
+                edit_reply_button_message(
+                    &bot_clone,
+                    format!("❌ {err}"),
+                    teloxide_chat_id,
+                    message_id,
+                )
+                .await;
+                error!("Error getting recording: {err:#}");
+            }
+        }
+    });
+
+    Ok(())
+}
+
+async fn edit_reply_button_message(
+    bot: &Bot,
+    text: String,
+    chat_id: teloxide::types::ChatId,
+    message_id: teloxide::types::MessageId,
+) {
+    bot.edit_message_reply_markup(chat_id, message_id)
+        .reply_markup(InlineKeyboardMarkup::new(vec![vec![
+            InlineKeyboardButton::callback(text, "noop"),
+        ]]))
+        .await
+        .ok();
 }
 
 fn help_text() -> String {

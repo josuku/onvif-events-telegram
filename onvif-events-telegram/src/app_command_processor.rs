@@ -1,13 +1,19 @@
+use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
+use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
 use app_core::domain::camera::CameraData;
 use app_core::helpers::network::is_reachable;
+use app_core::traits::api_camera_client::ApiCameraClient;
+use app_core::traits::command_processor::DownloadRecordingError;
 use app_core::traits::discovery_client::OnvifRsDiscoveryClient;
 use app_core::traits::onvif_camera_client::OnvifCameraClient;
+use app_core::MessageId;
 use app_core::{
     make_caption,
     traits::{command_processor::CommandProcessor, notifier::Notifier},
     CameraId, ChatId,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
@@ -73,6 +79,8 @@ impl AppCommandProcessor {
                 ),
                 snapshot.clone(),
                 chat_id,
+                camera_id,
+                &chrono::Utc::now(),
             )
             .await;
 
@@ -395,6 +403,7 @@ impl CommandProcessor for AppCommandProcessor {
                 snapshot_uri,
                 onvif_client: Arc::new(client),
                 api_camera_client: None, // TODO
+                device_info: None,
                 subscriptors: Vec::new(),
             })
             .await
@@ -494,4 +503,133 @@ impl CommandProcessor for AppCommandProcessor {
         }
         Ok(())
     }
+
+    async fn download_recording(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        camera_id: CameraId,
+        time: DateTime<Utc>,
+    ) -> Result<(), DownloadRecordingError> {
+        info!(
+            "command Download - chat_id:{} camera_id:{} time:{}",
+            chat_id, camera_id, time
+        );
+
+        let mut camera_data = match self.repository.get_camera(camera_id).await {
+            Some(camera) => camera,
+            None => {
+                let error = format!("camera {} not found", camera_id);
+                self.print_and_send_error(&error, chat_id).await;
+                return Err(DownloadRecordingError::CameraNotFound);
+            }
+        };
+
+        if camera_data.api_camera_client.is_none() {
+            camera_data.api_camera_client = make_api_camera_client(&mut camera_data).await;
+        }
+
+        if let Some(api_camera_client) = camera_data.api_camera_client {
+            let event_time = time - chrono::Duration::seconds(10);
+            let clip_time = chrono::Duration::seconds(10);
+            let recordings = match api_camera_client
+                .get_recordings(event_time, clip_time)
+                .await
+            {
+                Ok(recordings) => recordings,
+                Err(err) => {
+                    tracing::error!("error getting recordings. {}", err);
+                    if event_time + clip_time + chrono::Duration::minutes(5) > Utc::now() {
+                        return Err(DownloadRecordingError::NoRecordingsYet);
+                    }
+                    return Err(DownloadRecordingError::NoRecordings);
+                }
+            };
+
+            if recordings.is_empty() {
+                tracing::error!("no recordings");
+                return Err(DownloadRecordingError::NoRecordings);
+            }
+
+            tracing::info!("Found {} recording files:", recordings.len());
+            recordings.iter().for_each(|rec| {
+                tracing::info!(
+                    " - {} ({:.2} Mb) from {} to {}",
+                    rec.name,
+                    rec.size_mb,
+                    rec.begin,
+                    rec.end
+                )
+            });
+
+            let source_name = recordings.first().unwrap().name.to_string();
+            let target_name = format!(
+                "{}_{}_{}",
+                camera_id,
+                time.timestamp_millis(),
+                rand::random::<u32>()
+            );
+            match api_camera_client
+                .download_recording(
+                    recordings.first().unwrap(),
+                    event_time,
+                    clip_time,
+                    source_name,
+                    target_name.clone(),
+                )
+                .await
+            {
+                Ok(file_path) => {
+                    match self
+                        .notifier
+                        .send_video_message(&file_path, chat_id, Some(message_id))
+                        .await
+                    {
+                        Ok(_) => {
+                            tokio::fs::remove_file(&file_path).await.ok();
+                        }
+                        Err(err) => {
+                            tracing::error!("cannot send video message. {}", err);
+                            return Err(DownloadRecordingError::ErrorSendingVideo);
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(err) => {
+                    tracing::error!("cannot download recording. {}", err);
+                    return Err(DownloadRecordingError::Other);
+                }
+            }
+        }
+
+        tracing::error!("no api camera client available");
+        Err(DownloadRecordingError::RecordingDownloadNotAvailable)
+    }
+}
+
+async fn make_api_camera_client(camera_data: &mut CameraData) -> Option<Arc<dyn ApiCameraClient>> {
+    if let Ok(device_info) = camera_data.device_info().await {
+        match device_info.manufacturer.as_str() {
+            "Dahua" => {
+                return Some(Arc::new(DahuaRpcApiCameraClient::new(
+                    camera_data.host(),
+                    camera_data.username(),
+                    camera_data.password(),
+                )))
+            }
+            "H264" => {
+                return Some(Arc::new(DvrIpXmeyeApiCameraClient::new(
+                    camera_data.host(),
+                    camera_data.username(),
+                    camera_data.password(),
+                )))
+            }
+            manufacturer => {
+                tracing::error!("download not implemented for this manufacturer: {manufacturer}")
+            }
+        }
+    } else {
+        tracing::error!("cannot get device info to check which camera API to use");
+    }
+    None
 }

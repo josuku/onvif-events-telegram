@@ -1,5 +1,6 @@
-use crate::{CameraId, ChatId};
+use crate::{CameraId, ChatId, MessageId};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 #[async_trait]
 pub trait Notifier: Send + Sync {
@@ -10,6 +11,8 @@ pub trait Notifier: Send + Sync {
         message: &str,
         picture: Vec<u8>,
         chat_id: ChatId,
+        camera_id: CameraId,
+        time: &DateTime<Utc>,
     ) -> anyhow::Result<()>;
 
     async fn send_text_with_picture_message(
@@ -18,5 +21,13 @@ pub trait Notifier: Send + Sync {
         picture: Vec<u8>,
         chat_ids: Vec<ChatId>,
         camera_id: CameraId,
+        time: &DateTime<Utc>,
     );
+
+    async fn send_video_message(
+        &self,
+        video_path: &str,
+        chat_id: ChatId,
+        message_id: Option<MessageId>,
+    ) -> anyhow::Result<()>;
 }

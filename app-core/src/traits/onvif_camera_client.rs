@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::camera::{CameraConnectionData, OnvifCameraEvent};
+use crate::domain::camera::{CameraConnectionData, DeviceInfo, OnvifCameraEvent};
 
 #[async_trait]
 pub trait OnvifCameraClient: Send + Sync {
@@ -16,4 +16,5 @@ pub trait OnvifCameraClient: Send + Sync {
     ) -> anyhow::Result<String>;
     async fn unsubscribe(&self);
     async fn renew_subscription(&self, termination_time: &str);
+    async fn get_device_info(&self) -> anyhow::Result<DeviceInfo>;
 }

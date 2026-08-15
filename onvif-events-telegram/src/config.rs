@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub telegram: TelegramConfig,
     pub detector: DetectorConfig,
+    pub default_polling_seconds: u64,
+    pub default_between_seconds: u64,
 }
 
 #[derive(Deserialize, Debug, Clone)]

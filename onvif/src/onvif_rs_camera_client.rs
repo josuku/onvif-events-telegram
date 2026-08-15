@@ -4,7 +4,7 @@ use crate::onvif_rs_service_clients::{
 };
 use anyhow::bail;
 use app_core::{
-    domain::camera::{CameraConnectionData, CameraEventType, OnvifCameraEvent},
+    domain::camera::{CameraConnectionData, CameraEventType, DeviceInfo, OnvifCameraEvent},
     traits::onvif_camera_client::OnvifCameraClient,
 };
 use async_trait::async_trait;
@@ -296,6 +296,27 @@ impl OnvifCameraClient for OnvifRsCameraClient {
                 self.conn_data.uri,
                 err
             ),
+        }
+    }
+
+    async fn get_device_info(&self) -> anyhow::Result<DeviceInfo> {
+        if let Some(clients) = &self.clients {
+            match schema::devicemgmt::get_device_information(
+                &clients.devicemgmt,
+                &Default::default(),
+            )
+            .await
+            {
+                Ok(info) => Ok(DeviceInfo {
+                    manufacturer: info.manufacturer,
+                    model: info.model,
+                    firmware_version: info.firmware_version,
+                    serial_number: info.serial_number,
+                }),
+                Err(err) => bail!("cannot get device information:{}", err),
+            }
+        } else {
+            bail!("cannot get device information: no clients initialized");
         }
     }
 }

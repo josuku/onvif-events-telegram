@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 async-trait = "0.1.89"
 chrono = "0.4.38"
 network-interface = "2.0.0"
+thiserror = "2.0.20"
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 url = "2.2.0"

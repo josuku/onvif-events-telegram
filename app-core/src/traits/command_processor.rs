@@ -1,5 +1,7 @@
-use crate::{CameraId, ChatId};
+use crate::{CameraId, ChatId, MessageId};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use thiserror::Error;
 
 #[async_trait]
 pub trait CommandProcessor: Send + Sync {
@@ -41,4 +43,29 @@ pub trait CommandProcessor: Send + Sync {
         username: &str,
         password: &str,
     ) -> anyhow::Result<()>;
+    async fn download_recording(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        camera_id: CameraId,
+        time: DateTime<Utc>,
+    ) -> Result<(), DownloadRecordingError>;
+}
+
+#[derive(Error, Debug)]
+pub enum DownloadRecordingError {
+    #[error("Camera not found")]
+    CameraNotFound,
+    #[error("Max file size reached")]
+    MaxFileSize,
+    #[error("No recordings")]
+    NoRecordings,
+    #[error("No recordings yet")]
+    NoRecordingsYet,
+    #[error("Recording download not available")]
+    RecordingDownloadNotAvailable,
+    #[error("Error sending video")]
+    ErrorSendingVideo,
+    #[error("Other error")]
+    Other,
 }

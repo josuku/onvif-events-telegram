@@ -6,14 +6,15 @@ pub trait ApiCameraClient: Send + Sync {
     async fn init(&mut self, host: Option<String>, user: Option<String>, password: Option<String>);
     async fn get_recordings(
         &self,
-        start_time: chrono::DateTime<chrono::Utc>,
-        end_time: chrono::DateTime<chrono::Utc>,
+        time: chrono::DateTime<chrono::Utc>,
+        clip_time: chrono::Duration,
     ) -> anyhow::Result<Vec<Recording>>;
     async fn download_recording(
         &self,
-        start_time: chrono::DateTime<chrono::Utc>,
-        end_time: chrono::DateTime<chrono::Utc>,
+        recording: &Recording,
+        time: chrono::DateTime<chrono::Utc>,
+        clip_time: chrono::Duration,
         source_name: String,
         target_name: String,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<String>;
 }

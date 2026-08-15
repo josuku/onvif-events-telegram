@@ -8,6 +8,7 @@ pub mod traits;
 pub type CameraId = i64;
 pub type SubscriptionId = i64;
 pub type ChatId = i64;
+pub type MessageId = i32;
 
 pub fn make_caption(
     title: &str,

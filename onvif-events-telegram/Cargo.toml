@@ -16,9 +16,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
+api-camera = { path = "../api-camera" }
 app-core = { path = "../app-core" }
 onvif = { path = "../onvif" }
 repository = { path = "../repository" }
 telegram = { path = "../telegram" }
 ultralitics-detector = { path = "../ultralytics-detector"}
 itertools = "0.15.0"
+rand = "0.10.2"

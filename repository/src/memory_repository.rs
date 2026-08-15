@@ -64,6 +64,7 @@ impl MemoryRepository {
                 snapshot_uri: camera.snapshot_uri,
                 onvif_client: Arc::new(client),
                 api_camera_client: None, // TODO
+                device_info: None,
                 subscriptors: Vec::new(),
             })
             .await?;
@@ -413,6 +414,7 @@ impl MemoryRepository {
                         snapshot_uri,
                         onvif_client: Arc::new(client),
                         api_camera_client: None, // TODO
+                        device_info: None,
                         subscriptors: Vec::new(),
                     })
                     .await

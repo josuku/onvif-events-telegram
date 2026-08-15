@@ -1,0 +1,18 @@
+[package]
+name = "api-camera"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.89"
+chrono = "0.4.38"
+diqwest = "3.2.0"
+dvrip-rs = "0.1.0" # for DvRip XMeye chinese cameras
+futures-util = "0.3.33"
+md5 = "0.8.1"
+reqwest = { version = "0.13.4", features = ["json", "stream", "cookies"] }
+serde_json = "1.0.151"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+app-core = { path = "../app-core" }

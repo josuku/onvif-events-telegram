@@ -24,9 +24,6 @@ use tracing_appender::non_blocking;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use ultralitics_detector::UltralyticsDetector;
 
-const DEFAULT_POLLING_SECONDS: u64 = 1;
-const DEFAULT_BETWEEN_SECONDS: u64 = 15;
-
 #[tokio::main]
 async fn main() {
     let _logging_guard = init_logging().expect("cannot initialize guard");
@@ -40,8 +37,8 @@ async fn main() {
     let repo_store = Arc::new(DbStore::new());
     repo_store.create_tables();
     let repository = Arc::new(MemoryRepository::new(
-        DEFAULT_POLLING_SECONDS,
-        DEFAULT_BETWEEN_SECONDS,
+        config.default_polling_seconds,
+        config.default_between_seconds,
         repo_store,
     ));
     repository

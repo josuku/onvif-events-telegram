@@ -1,9 +1,15 @@
-use anyhow::bail;
-use app_core::{traits::notifier::Notifier, CameraId, ChatId};
+use anyhow::{bail, Context};
+use app_core::{traits::notifier::Notifier, CameraId, ChatId, MessageId};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use repository::memory_repository::MemoryRepository;
-use std::sync::Arc;
-use teloxide::{payloads::SendPhotoSetters, prelude::Requester, types::InputFile, Bot};
+use std::{path::Path, sync::Arc};
+use teloxide::{
+    payloads::{SendPhotoSetters, SendVideoSetters},
+    prelude::Requester,
+    types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyParameters},
+    Bot,
+};
 use tracing::warn;
 
 #[derive(Clone)]
@@ -37,13 +43,21 @@ impl Notifier for TelegramNotifier {
         message: &str,
         picture: Vec<u8>,
         chat_id: ChatId,
+        camera_id: CameraId,
+        time: &DateTime<Utc>,
     ) -> anyhow::Result<()> {
         let file = InputFile::memory(picture.clone()).file_name("new_file.jpg");
+
+        let go_to_recording = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
+            "📹 Get Recording ±10s",
+            format!("recording|{}|{}", camera_id, time.to_rfc3339()),
+        )]]);
 
         if let Err(err) = self
             .client
             .send_photo(teloxide::prelude::ChatId(chat_id), file)
             .caption(message)
+            .reply_markup(go_to_recording)
             .await
         {
             bail!("cannot send picture to Telegram {:?}", err)
@@ -57,6 +71,7 @@ impl Notifier for TelegramNotifier {
         picture: Vec<u8>,
         chat_ids: Vec<ChatId>,
         camera_id: CameraId,
+        time: &DateTime<Utc>,
     ) {
         for chat_id in chat_ids {
             let last_notification_time = self
@@ -70,7 +85,7 @@ impl Notifier for TelegramNotifier {
                     > between_seconds.try_into().unwrap()
             {
                 if let Ok(()) = self
-                    .send_picture_message(&message, picture.clone(), chat_id)
+                    .send_picture_message(&message, picture.clone(), chat_id, camera_id, time)
                     .await
                 {
                     self.repository
@@ -84,5 +99,41 @@ impl Notifier for TelegramNotifier {
                 );
             }
         }
+    }
+
+    async fn send_video_message(
+        &self,
+        video_path: &str,
+        chat_id: ChatId,
+        message_id: Option<MessageId>,
+    ) -> anyhow::Result<()> {
+        let bytes = tokio::fs::read(video_path)
+            .await
+            .with_context(|| format!("cannot read video file {video_path}"))?;
+
+        let file_name = Path::new(video_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video.mp4")
+            .to_string();
+
+        let file = InputFile::memory(bytes).file_name(file_name);
+        // let file = InputFile::file(video_path);
+        let chat_id = teloxide::prelude::ChatId(chat_id);
+
+        let result = if let Some(message_id) = message_id {
+            let message_id = teloxide::types::MessageId(message_id);
+            self.client
+                .send_video(chat_id, file)
+                .reply_parameters(ReplyParameters::new(message_id))
+                .await
+        } else {
+            self.client.send_video(chat_id, file).await
+        };
+
+        if let Err(err) = result {
+            bail!("{:?}", err)
+        }
+        Ok(())
     }
 }

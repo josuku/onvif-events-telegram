@@ -38,8 +38,10 @@ https://github.com/microsoft/onnxruntime/releases
 ```
 
 TODOs
+- retry callback if error downloading
+- add callback button to snapshots
 - get camera info and available onvif services
-- add recording download feature using camera api (if available) (needs ffmpeg to convert video result)
+- add oxvif implementation for onvif camera client
 - save polling and between timeouts in SQLite
 - reboot camera command (maybe indicate if polling has errors)
 - add getvideo command indicating camera and number or seconds or minutes
