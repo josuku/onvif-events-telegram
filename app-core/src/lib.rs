@@ -40,7 +40,7 @@ Camera: {}
 Time: {}{}"#,
         title.to_uppercase(),
         name,
-        time,
+        format_time(time),
         format_objects(objects),
     )
 }
@@ -61,9 +61,13 @@ Time: {}{}"#,
         title.to_uppercase(),
         name,
         event_type,
-        time,
+        format_time(time),
         format_objects(objects),
     )
+}
+
+fn format_time(time: &chrono::DateTime<chrono::Local>) -> String {
+    time.format("%Y-%m-%d %H:%M:%S %:z").to_string()
 }
 
 fn format_objects(objects: &[Object]) -> String {

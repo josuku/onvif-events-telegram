@@ -8,6 +8,7 @@ use app_core::{
     traits::onvif_camera_client::OnvifCameraClient,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 use diqwest::{DigestAuthSession, WithDigestAuth};
 use futures_util::lock::Mutex;
 use onvif::soap::client::{AuthType, Client as SoapClient, ClientBuilder};
@@ -209,9 +210,10 @@ impl OnvifCameraClient for OnvifRsCameraClient {
             match pull_messages_response {
                 Ok(msg) => {
                     if let Some(event_type) = parse_event_type(&msg) {
+                        let raw_timestamp = msg.current_time.value.to_utc();
                         return Ok(Some(OnvifCameraEvent {
                             r#type: event_type,
-                            timestamp: msg.current_time.value.to_utc(),
+                            timestamp: correct_fixed_offset_bug(raw_timestamp),
                         }));
                     } else {
                         tracing::debug!("unrecognized event:{:?}", msg);
@@ -531,4 +533,31 @@ fn replace_snapshot_uri_credentials(
         .finish();
     url.set_query(Some(&new_query));
     url.to_string()
+}
+
+// some chinese icSee/XMeye cameras dont send correct timezone with events
+fn correct_fixed_offset_bug(raw_timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    const TOLERANCE_MINUTES: i64 = 5;
+
+    let now = Utc::now();
+    let diff_minutes = now.signed_duration_since(raw_timestamp).num_minutes();
+    let hours_off = (diff_minutes as f64 / 60.0).round() as i64;
+
+    if hours_off == 0 {
+        return raw_timestamp;
+    }
+
+    let remainder = (diff_minutes - hours_off * 60).abs();
+    if remainder <= TOLERANCE_MINUTES {
+        let corrected = raw_timestamp + Duration::hours(hours_off);
+        tracing::debug!(
+            "current_time wrong ~{}h against local time, fixing: {} -> {}",
+            hours_off,
+            raw_timestamp,
+            corrected
+        );
+        corrected
+    } else {
+        raw_timestamp
+    }
 }

@@ -495,9 +495,7 @@ fn compute_clip_window(
     let (clip_start_time, clip_end_time) = get_clip_interval(time, clip_time);
 
     if (clip_end_time - clip_start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-        anyhow::bail!(
-            "Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way"
-        );
+        anyhow::bail!("Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way");
     }
 
     let local_offset = *time.with_timezone(&Local).offset();
