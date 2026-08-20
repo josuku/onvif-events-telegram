@@ -57,6 +57,5 @@ TODOs
 - updated sync state (yellow ball or description)
 - add getvideo command indicating camera and number or seconds or minutes
 - add zoom in-out command if possible (for varifocal)
-- add Dockerfile (check if existing is valid)
 - save detections in postgres and pictures in a folder (in future must have a cleanup process)
 - make a frontend to be able to check pictures with data, and search by date, camera or object
