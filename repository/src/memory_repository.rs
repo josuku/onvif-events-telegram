@@ -2,14 +2,14 @@ use anyhow::bail;
 use app_core::{
     CameraId, ChatId,
     domain::{
-        camera::{CameraConnectionData, CameraData},
+        camera::{CameraConnectionData, CameraData, CameraStatus},
         discovery_device::DiscoveryDevice,
     },
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use onvif::onvif_rs_camera_client::create_onvif_camera_client;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{sync::Mutex, time::timeout};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -21,11 +21,7 @@ pub struct MemoryRepository {
     polling_seconds: Mutex<u64>,
     between_seconds: Mutex<u64>,
     repo_store: Arc<DbStore>,
-    #[allow(clippy::type_complexity)]
-    last_notifications: Mutex<HashMap<(CameraId, ChatId), Option<chrono::DateTime<Utc>>>>,
-    today_notifications: Mutex<HashMap<CameraId, Vec<chrono::DateTime<Utc>>>>,
     daily_report_subscriptors: Mutex<Vec<ChatId>>,
-    last_polling: Mutex<HashMap<CameraId, chrono::DateTime<Utc>>>,
 }
 
 impl MemoryRepository {
@@ -35,10 +31,7 @@ impl MemoryRepository {
             polling_seconds: Mutex::new(polling_seconds),
             between_seconds: Mutex::new(between_seconds),
             repo_store,
-            last_notifications: Mutex::new(HashMap::new()),
-            today_notifications: Mutex::new(HashMap::new()),
             daily_report_subscriptors: Mutex::new(Vec::new()),
-            last_polling: Mutex::new(HashMap::new()),
         }
     }
 
@@ -66,6 +59,13 @@ impl MemoryRepository {
                 api_camera_client: None, // TODO
                 device_info: None,
                 subscriptors: Vec::new(),
+                status: CameraStatus {
+                    last_polling: None,
+                    last_error: None,
+                    last_error_notified: false,
+                    last_notification_by_chat_id: HashMap::new(),
+                    today_notifications: Vec::new(),
+                },
             })
             .await?;
 
@@ -122,52 +122,38 @@ impl MemoryRepository {
         camera_id: CameraId,
         chat_id: ChatId,
     ) -> Option<chrono::DateTime<Utc>> {
-        let last_notifications = self.last_notifications.lock().await;
-        match last_notifications.get(&(camera_id, chat_id)) {
-            Some(time) => *time,
-            None => None,
+        let cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get(&camera_id) {
+            camera
+                .status
+                .last_notification_by_chat_id
+                .get(&chat_id)
+                .cloned()
+        } else {
+            error!("camera {} not found", camera_id);
+            None
         }
     }
 
     pub async fn update_last_notification_time(&self, camera_id: CameraId, chat_id: ChatId) {
-        let mut last_notifications = self.last_notifications.lock().await;
-        let now = chrono::Utc::now();
-        last_notifications.insert((camera_id, chat_id), Some(now));
-        self.update_today_notification(camera_id, now).await;
-    }
-
-    pub async fn get_today_camera_notifications(
-        &self,
-        camera_id: CameraId,
-    ) -> Vec<chrono::DateTime<Utc>> {
-        let today_notifications = self.today_notifications.lock().await;
-        if let Some(camera_notifications) = today_notifications.get(&camera_id) {
-            return camera_notifications.to_vec();
-        }
-        Vec::new()
-    }
-
-    async fn update_today_notification(&self, camera_id: CameraId, now: chrono::DateTime<Utc>) {
-        let mut today_notifications = self.today_notifications.lock().await;
-        match today_notifications.get_mut(&camera_id) {
-            Some(camera_notifications) => camera_notifications.push(now),
-            None => {
-                today_notifications.insert(camera_id, vec![now]);
-            }
+        let mut cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get_mut(&camera_id) {
+            let now = chrono::Utc::now();
+            camera
+                .status
+                .last_notification_by_chat_id
+                .insert(chat_id, now);
+            camera.status.today_notifications.push(now);
+        } else {
+            error!("camera {} not found", camera_id);
         }
     }
 
     pub async fn clear_today_notifications(&self) {
-        let mut today_notifications = self.today_notifications.lock().await;
-        today_notifications.clear();
-    }
-
-    pub async fn get_last_polling_from_camera(
-        &self,
-        camera_id: CameraId,
-    ) -> Option<chrono::DateTime<Utc>> {
-        let last_polling = self.last_polling.lock().await;
-        last_polling.get(&camera_id).copied()
+        let mut cameras = self.cameras.lock().await;
+        for (_, camera) in cameras.iter_mut() {
+            camera.status.today_notifications.clear();
+        }
     }
 
     pub async fn update_last_polling_from_camera(
@@ -175,8 +161,12 @@ impl MemoryRepository {
         camera_id: CameraId,
         now: chrono::DateTime<Utc>,
     ) {
-        let mut last_polling = self.last_polling.lock().await;
-        last_polling.insert(camera_id, now);
+        let mut cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get_mut(&camera_id) {
+            camera.status.last_polling = Some(now);
+        } else {
+            error!("camera {} not found", camera_id)
+        }
     }
 
     pub async fn add_camera(&self, mut camera: CameraData) -> anyhow::Result<()> {
@@ -275,6 +265,21 @@ impl MemoryRepository {
         }
     }
 
+    pub async fn set_camera_last_error(
+        &self,
+        camera_id: CameraId,
+        last_error: Option<DateTime<Utc>>,
+        notified: bool,
+    ) {
+        let mut cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get_mut(&camera_id) {
+            camera.status.last_error = last_error;
+            camera.status.last_error_notified = notified;
+        } else {
+            error!("camera {} not found", camera_id)
+        }
+    }
+
     pub async fn set_polling_seconds(&self, seconds: u64) {
         let mut polling_seconds = self.polling_seconds.lock().await;
         *polling_seconds = seconds;
@@ -326,31 +331,36 @@ impl MemoryRepository {
         camera_id: CameraId,
         new_client: Arc<dyn OnvifCameraClient>,
     ) -> anyhow::Result<()> {
-        let mut cameras = self.cameras.lock().await;
-        let old_client = match cameras.get_mut(&camera_id) {
-            Some(camera) => {
-                tracing::info!(
-                    "UPDATING camera:{} from ip:{} to ip:{}",
-                    camera_id,
-                    camera.onvif_client.get_connection_data().uri,
-                    new_client.get_connection_data().uri
-                );
-                if camera.onvif_client.get_connection_data() == new_client.get_connection_data() {
-                    tracing::warn!(
-                        "trying to replace camera client with same data for camera {}",
-                        camera_id
+        let old_client = {
+            let mut cameras: tokio::sync::MutexGuard<'_, HashMap<i64, CameraData>> =
+                self.cameras.lock().await;
+            match cameras.get_mut(&camera_id) {
+                Some(camera) => {
+                    tracing::info!(
+                        "UPDATING camera:{} from ip:{} to ip:{}",
+                        camera_id,
+                        camera.onvif_client.get_connection_data().uri,
+                        new_client.get_connection_data().uri
                     );
-                    return Ok(());
+                    if camera.onvif_client.get_connection_data() == new_client.get_connection_data()
+                        && camera.status.last_error.is_none()
+                    {
+                        tracing::warn!(
+                            "trying to replace camera client with same data for camera {}",
+                            camera_id
+                        );
+                        return Ok(());
+                    }
+                    let old_client = camera.onvif_client.clone();
+                    camera.onvif_client = new_client.clone();
+                    self.repo_store
+                        .update_uri_from_camera(camera_id, &new_client.get_connection_data().uri);
+                    old_client
                 }
-                let old_client = camera.onvif_client.clone();
-                camera.onvif_client = new_client.clone();
-                self.repo_store
-                    .update_uri_from_camera(camera_id, &new_client.get_connection_data().uri);
-                old_client
+                None => bail!("cannot find camera {} to replace camera client", camera_id),
             }
-            None => bail!("cannot find camera {} to replace camera client", camera_id),
         };
-        let _ = old_client.unsubscribe().await;
+        let _ = timeout(Duration::from_secs(5), old_client.unsubscribe()).await;
         Ok(())
     }
 
@@ -416,6 +426,13 @@ impl MemoryRepository {
                         api_camera_client: None, // TODO
                         device_info: None,
                         subscriptors: Vec::new(),
+                        status: CameraStatus {
+                            last_polling: None,
+                            last_error: None,
+                            last_error_notified: false,
+                            last_notification_by_chat_id: HashMap::new(),
+                            today_notifications: Vec::new(),
+                        },
                     })
                     .await
                 {

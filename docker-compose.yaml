@@ -3,6 +3,8 @@ services:
     build: .
     container_name: onvif-events-telegram
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 5s
     # to have Onvif WS-Discovery working in multicast (UDP 239.255.255.250:3702) (only Linux)
     network_mode: host
     volumes:

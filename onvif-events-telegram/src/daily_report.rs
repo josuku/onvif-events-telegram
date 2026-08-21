@@ -17,15 +17,13 @@ pub async fn manage_daily_report(
         report.push_str(&format!("Daily report {}\n", last_polling.date_naive()));
 
         for camera in repository.get_sorted_cameras().await {
-            let notifications = repository.get_today_camera_notifications(camera.id).await;
+            let notifications = camera.status.today_notifications;
             let mut status = "";
             if !camera.onvif_client.connected() {
                 status = "\n (disconnected)";
             }
             let mut last_sync = "".to_string();
-            if let Some(last_polling_time) =
-                repository.get_last_polling_from_camera(camera.id).await
-            {
+            if let Some(last_polling_time) = camera.status.last_polling {
                 last_sync = format!("\n   (sync: {})", time_ago(now.to_utc(), last_polling_time));
             }
 

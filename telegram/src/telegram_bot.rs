@@ -1,6 +1,6 @@
 use app_core::{
     domain::event_bus::EventBus,
-    make_caption,
+    make_caption, make_error,
     traits::{command_processor::CommandProcessor, notifier::Notifier},
     CameraId,
 };
@@ -104,21 +104,45 @@ impl TelegramBot {
         let notifier = self.notifier.clone();
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
-                notifier
-                    .send_text_with_picture_message(
-                        make_caption(
-                            "New Detection",
-                            &event.camera.name,
-                            &event.timestamp,
-                            Some(event.r#type),
-                            &event.objects,
-                        ),
-                        event.snapshot.clone(),
-                        event.camera.subscriptors.clone(),
-                        event.camera.id,
-                        &event.timestamp,
-                    )
-                    .await;
+                match event {
+                    app_core::domain::event_bus::EventBusMessage::CameraEvent(camera_event) => {
+                        notifier
+                            .send_text_with_picture_message(
+                                make_caption(
+                                    "New Detection",
+                                    &camera_event.camera.name,
+                                    &camera_event.camera.id,
+                                    &camera_event.timestamp,
+                                    Some(camera_event.r#type),
+                                    &camera_event.objects,
+                                ),
+                                camera_event.snapshot.clone(),
+                                camera_event.camera.subscriptors.clone(),
+                                camera_event.camera.id,
+                                &camera_event.timestamp,
+                            )
+                            .await;
+                    }
+                    app_core::domain::event_bus::EventBusMessage::Error(error_message) => {
+                        let title = if error_message.recovered {
+                            "ERROR RECOVERED"
+                        } else {
+                            "ERROR"
+                        };
+                        notifier
+                            .send_text_message(
+                                make_error(
+                                    title,
+                                    &error_message.message,
+                                    &error_message.camera.name,
+                                    &error_message.camera.id,
+                                    &error_message.timestamp,
+                                ),
+                                error_message.camera.subscriptors.clone(),
+                            )
+                            .await;
+                    }
+                }
             }
         });
     }

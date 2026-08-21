@@ -77,7 +77,7 @@ async fn main() {
         _ = start_bot(telegram_bot) => (),
         _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector) => (),
         _ = renew_subscriptions(repository.clone()), if config.auto_renewal => (),
-        _ = signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             close_subscriptions(repository).await;
             info!("Closing app")
         },
@@ -162,4 +162,28 @@ pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGu
     tracing::info!("logging initialized");
 
     Ok(guard)
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received Ctrl+C");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+    }
 }

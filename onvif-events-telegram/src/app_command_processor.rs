@@ -1,6 +1,6 @@
 use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
 use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
-use app_core::domain::camera::CameraData;
+use app_core::domain::camera::{CameraData, CameraStatus};
 use app_core::helpers::network::is_reachable;
 use app_core::traits::api_camera_client::ApiCameraClient;
 use app_core::traits::command_processor::DownloadRecordingError;
@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -73,6 +74,7 @@ impl AppCommandProcessor {
                 &make_caption(
                     "Snapshot",
                     &camera.name,
+                    &camera.id,
                     &chrono::Utc::now(),
                     None,
                     &Vec::new(),
@@ -110,6 +112,7 @@ impl CommandProcessor for AppCommandProcessor {
         {
             error!("cannot update cameras: {}", err);
         }
+
         let mut cameras = self.repository.get_cameras().await;
         if cameras.is_empty() {
             self.notifier
@@ -120,7 +123,14 @@ impl CommandProcessor for AppCommandProcessor {
             let mut lines = vec!["Available cameras:".to_string()];
             for camera in cameras {
                 let reachable = is_reachable(&camera.onvif_client.get_connection_data().uri).await;
-                let status = if reachable { "🟢" } else { "🔴" };
+                let has_error = camera.status.last_error.is_some();
+                let status = if reachable && !has_error {
+                    "🟢"
+                } else if has_error {
+                    "🟠"
+                } else {
+                    "🔴"
+                };
                 lines.push(format!("{status} {camera}"));
             }
             self.notifier
@@ -405,6 +415,13 @@ impl CommandProcessor for AppCommandProcessor {
                 api_camera_client: None, // TODO
                 device_info: None,
                 subscriptors: Vec::new(),
+                status: CameraStatus {
+                    last_polling: None,
+                    last_error: None,
+                    last_error_notified: false,
+                    last_notification_by_chat_id: HashMap::new(),
+                    today_notifications: Vec::new(),
+                },
             })
             .await
         {

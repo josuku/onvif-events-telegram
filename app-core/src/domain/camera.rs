@@ -4,7 +4,7 @@ use crate::{
     traits::{api_camera_client::ApiCameraClient, onvif_camera_client::OnvifCameraClient},
 };
 use chrono::{DateTime, Utc};
-use std::{fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 #[derive(Clone, Debug, Copy)]
 pub enum CameraEventType {
@@ -51,6 +51,7 @@ pub struct CameraData {
     pub onvif_client: Arc<dyn OnvifCameraClient>,
     pub api_camera_client: Option<Arc<dyn ApiCameraClient>>,
     pub subscriptors: Vec<ChatId>,
+    pub status: CameraStatus,
 }
 impl fmt::Display for CameraData {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -73,6 +74,15 @@ impl fmt::Display for CameraData {
             self.subscriptors.len(),
         )
     }
+}
+
+#[derive(Clone)]
+pub struct CameraStatus {
+    pub last_polling: Option<DateTime<Utc>>,
+    pub last_error: Option<DateTime<Utc>>,
+    pub last_error_notified: bool,
+    pub last_notification_by_chat_id: HashMap<ChatId, chrono::DateTime<Utc>>,
+    pub today_notifications: Vec<DateTime<Utc>>,
 }
 
 #[derive(Clone)]

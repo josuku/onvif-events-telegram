@@ -54,7 +54,6 @@ TODOs
 - add oxvif implementation for onvif camera client
 - save polling and between timeouts in SQLite
 - reboot camera command (maybe indicate if polling has errors)
-- updated sync state (yellow ball or description)
 - add getvideo command indicating camera and number or seconds or minutes
 - add zoom in-out command if possible (for varifocal)
 - save detections in postgres and pictures in a folder (in future must have a cleanup process)

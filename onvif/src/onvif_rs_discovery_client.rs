@@ -33,18 +33,23 @@ impl OnvifRsDiscoveryClient for OnvifDiscoveryClient {
             warn!("no devices discovery using multicast. trying with unicast");
 
             if let Some(netmask) = ipv4.netmask {
-                // try unicast discovery
-                devices = discovery::DiscoveryBuilder::default()
-                    .listen_address(IpAddr::V4(ipv4.ip))
-                    .discovery_mode(onvif::discovery::DiscoveryMode::Unicast {
-                        network: ipv4.ip,
-                        network_mask: netmask,
-                    })
-                    .run()
-                    .await
-                    .unwrap()
-                    .collect::<Vec<Device>>()
-                    .await;
+                // protection against Docker Desktop on Windows and onvif-rs bug with zero division
+                if netmask == std::net::Ipv4Addr::new(255, 255, 255, 255) {
+                    warn!("netmask /32 detected (Docker Desktop) -> omiting unicast discovery");
+                } else {
+                    // try unicast discovery
+                    devices = discovery::DiscoveryBuilder::default()
+                        .listen_address(IpAddr::V4(ipv4.ip))
+                        .discovery_mode(onvif::discovery::DiscoveryMode::Unicast {
+                            network: ipv4.ip,
+                            network_mask: netmask,
+                        })
+                        .run()
+                        .await
+                        .unwrap()
+                        .collect::<Vec<Device>>()
+                        .await;
+                }
             }
             if devices.is_empty() {
                 warn!("no devices discovery using unicast");
