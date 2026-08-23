@@ -18,7 +18,7 @@ use tracing::{error, info};
 pub async fn check_for_detections_in_cameras(
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
-    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
+    object_detector: Arc<Mutex<dyn ObjectDetector>>,
 ) {
     let now = chrono::Utc::now();
     let cameras = repository.get_cameras().await;
@@ -48,7 +48,7 @@ async fn check_camera(
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
     now: chrono::DateTime<chrono::Utc>,
-    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
+    object_detector: Arc<Mutex<dyn ObjectDetector>>,
 ) {
     let camera = match repository.get_camera(camera_id).await {
         Some(camera) => camera,
@@ -100,27 +100,7 @@ async fn check_camera(
                 Err(err) => error!("cannot create onvif camera client. error:{}", err),
             };
 
-            if let Some(last_error) = camera.status.last_error {
-                let diff = Utc::now() - last_error;
-                if diff > TimeDelta::minutes(5) && !camera.status.last_error_notified {
-                    event_bus.publish(EventBusMessage::Error(ErrorMessage {
-                        timestamp: last_error,
-                        camera: camera.clone(),
-                        message: format!(
-                            "❌ Sync camera failed during {} minutes",
-                            diff.num_minutes()
-                        ),
-                        recovered: false,
-                    }));
-                    let _ = repository
-                        .set_camera_last_error(camera.id, camera.status.last_error, true)
-                        .await;
-                }
-            } else {
-                let _ = repository
-                    .set_camera_last_error(camera.id, Some(Utc::now()), false)
-                    .await;
-            }
+            set_sync_error_and_notify(&camera, &repository, &event_bus).await;
 
             return;
         }
@@ -139,9 +119,14 @@ async fn check_camera(
         }
     };
 
-    let objects = if let Some(object_detector) = object_detector {
+    let config = repository.get_config().await;
+    let objects = if config.detector.enable {
         let mut object_detector = object_detector.lock().await;
-        match object_detector.detect(&snapshot) {
+        match object_detector.detect(
+            &snapshot,
+            config.detector.min_confidence,
+            &config.detector.types,
+        ) {
             Ok(objects) => objects,
             Err(err) => {
                 error!("error detecting objects:{}", err);
@@ -174,13 +159,44 @@ async fn check_camera(
     );
 }
 
+async fn set_sync_error_and_notify(
+    camera: &CameraData,
+    repository: &Arc<MemoryRepository>,
+    event_bus: &Arc<EventBus>,
+) {
+    if let Some(last_error) = camera.status.last_error {
+        let diff = Utc::now() - last_error;
+        if diff > TimeDelta::minutes(5)
+            && !camera.status.last_error_notified
+            && repository.get_config().await.send_errors
+        {
+            event_bus.publish(EventBusMessage::Error(ErrorMessage {
+                timestamp: last_error,
+                camera: camera.clone(),
+                message: format!(
+                    "❌ Sync camera failed during {} minutes",
+                    diff.num_minutes()
+                ),
+                recovered: false,
+            }));
+            let _ = repository
+                .set_camera_last_error(camera.id, camera.status.last_error, true)
+                .await;
+        }
+    } else {
+        let _ = repository
+            .set_camera_last_error(camera.id, Some(Utc::now()), false)
+            .await;
+    }
+}
+
 async fn clean_sync_error_and_notify(
     camera: &CameraData,
     repository: &Arc<MemoryRepository>,
     event_bus: &Arc<EventBus>,
 ) {
     if camera.status.last_error.is_some() {
-        if camera.status.last_error_notified {
+        if camera.status.last_error_notified && repository.get_config().await.send_errors {
             event_bus.publish(EventBusMessage::Error(ErrorMessage {
                 timestamp: Utc::now(),
                 camera: camera.clone(),

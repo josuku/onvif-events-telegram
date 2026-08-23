@@ -1,6 +1,7 @@
 use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
 use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
 use app_core::domain::camera::{CameraData, CameraStatus};
+use app_core::domain::object::{ObjectClass, object_classes_to_string};
 use app_core::helpers::network::is_reachable;
 use app_core::traits::api_camera_client::ApiCameraClient;
 use app_core::traits::command_processor::DownloadRecordingError;
@@ -13,7 +14,7 @@ use app_core::{
     CameraId, ChatId,
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
@@ -34,11 +35,19 @@ impl AppCommandProcessor {
         }
     }
 
-    async fn print_and_send_error(&self, error: &str, chat_id: ChatId) {
+    async fn send_error(&self, error: &str, chat_id: ChatId) {
         error!("{}", error);
         let _ = self
             .notifier
-            .send_text_message(error.to_owned(), vec![chat_id])
+            .send_text_message(format!("❌ {}", error), vec![chat_id])
+            .await;
+    }
+
+    async fn send_success(&self, message: &str, chat_id: ChatId) {
+        info!("{}", message);
+        let _ = self
+            .notifier
+            .send_text_message(format!("✅ {}", message), vec![chat_id])
             .await;
     }
 
@@ -51,7 +60,7 @@ impl AppCommandProcessor {
             Some(camera) => camera,
             None => {
                 let error = format!("cannot find camera with id: {}", camera_id);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -63,7 +72,7 @@ impl AppCommandProcessor {
                     "error getting snapshot from camera:{:?} err:{}",
                     camera.name, err
                 );
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -126,10 +135,10 @@ impl CommandProcessor for AppCommandProcessor {
                 let has_error = camera.status.last_error.is_some();
                 let status = if reachable && !has_error {
                     "🟢"
-                } else if has_error {
-                    "🟠"
-                } else {
+                } else if !reachable {
                     "🔴"
+                } else {
+                    "🟠"
                 };
                 lines.push(format!("{status} {camera}"));
             }
@@ -156,18 +165,10 @@ impl CommandProcessor for AppCommandProcessor {
             .await
         {
             Ok(_) => {
-                self.notifier
-                    .send_text_message(
-                        "Camera name updated successfully".to_string(),
-                        vec![chat_id],
-                    )
-                    .await;
-            }
-            Err(err) => {
-                self.notifier
-                    .send_text_message(format!("{}", err), vec![chat_id])
+                self.send_success("Camera name updated successfully", chat_id)
                     .await
             }
+            Err(err) => self.send_error(&err.to_string(), chat_id).await,
         };
         Ok(())
     }
@@ -182,16 +183,8 @@ impl CommandProcessor for AppCommandProcessor {
             .subscribe_to_camera(camera_id, chat_id, true)
             .await
         {
-            Ok(_) => {
-                self.notifier
-                    .send_text_message("Subscribed successfully".to_string(), vec![chat_id])
-                    .await
-            }
-            Err(err) => {
-                self.notifier
-                    .send_text_message(format!("{}", err), vec![chat_id])
-                    .await
-            }
+            Ok(_) => self.send_success("Subscribed successfully", chat_id).await,
+            Err(err) => self.send_error(&err.to_string(), chat_id).await,
         };
         Ok(())
     }
@@ -207,15 +200,10 @@ impl CommandProcessor for AppCommandProcessor {
             .await
         {
             Ok(_) => {
-                self.notifier
-                    .send_text_message("Unsubscribed successfully".to_string(), vec![chat_id])
+                self.send_success("Unsubscribed successfully", chat_id)
                     .await
             }
-            Err(err) => {
-                self.notifier
-                    .send_text_message(format!("{}", err), vec![chat_id])
-                    .await
-            }
+            Err(err) => self.send_error(&err.to_string(), chat_id).await,
         };
         Ok(())
     }
@@ -241,36 +229,154 @@ impl CommandProcessor for AppCommandProcessor {
         Ok(())
     }
 
-    async fn set_polling_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
+    async fn config_polling_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
         info!(
-            "command SetPollingTime - chat id:{} seconds:{}",
+            "command ConfigPollingTime - chat id:{} seconds:{}",
             chat_id, seconds
         );
-        self.repository.set_polling_seconds(seconds).await;
-        let _ = self
-            .notifier
-            .send_text_message(
-                "Polling time updated successfully".to_string(),
-                vec![chat_id],
-            )
+        self.repository
+            .config_polling_seconds(seconds, chat_id)
+            .await;
+        self.send_success("Polling time config updated successfully", chat_id)
             .await;
         Ok(())
     }
 
-    async fn set_between_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
+    async fn config_between_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
         info!(
-            "command SetBetweenTime - chat id:{} seconds:{}",
+            "command ConfigBetweenTime - chat id:{} seconds:{}",
             chat_id, seconds
         );
-        self.repository.set_between_seconds(seconds).await;
-        let _ = self
-            .notifier
-            .send_text_message(
-                "Between time updated successfully".to_string(),
-                vec![chat_id],
-            )
+        self.repository
+            .config_between_seconds(seconds, chat_id)
+            .await;
+        self.send_success("Between time config updated successfully", chat_id)
             .await;
         Ok(())
+    }
+
+    async fn config_send_errors_cmd(
+        &self,
+        chat_id: ChatId,
+        send_errors: bool,
+    ) -> anyhow::Result<()> {
+        info!("command ConfigSendErrors - send_errors:{}", send_errors);
+        self.repository
+            .config_send_errors(send_errors, chat_id)
+            .await;
+        self.send_success("Send errors config updated successfully", chat_id)
+            .await;
+        Ok(())
+    }
+
+    async fn config_auto_renewal_cmd(&self, chat_id: ChatId, enable: bool) -> anyhow::Result<()> {
+        info!("command ConfigAutoRenewal - enable:{}", enable);
+        self.repository.config_auto_renewal(enable, chat_id).await;
+        self.send_success("Auto renewal config updated successfully", chat_id)
+            .await;
+        Ok(())
+    }
+
+    async fn config_recording_clip_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
+        info!("command ConfiRecordingClip - seconds:{}", seconds);
+        self.repository
+            .config_recording_clip(seconds, chat_id)
+            .await;
+        self.send_success("Recording clip config updated successfully", chat_id)
+            .await;
+        Ok(())
+    }
+
+    async fn config_detector_enable_cmd(
+        &self,
+        chat_id: ChatId,
+        enable: bool,
+    ) -> anyhow::Result<()> {
+        info!("command ConfigDetectorEnable - enable:{}", enable);
+        self.repository
+            .config_detector_enable(enable, chat_id)
+            .await;
+        self.send_success("Detector enable config updated successfully", chat_id)
+            .await;
+        Ok(())
+    }
+
+    async fn config_detector_min_confidence_cmd(
+        &self,
+        chat_id: ChatId,
+        confidence: f32,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command ConfigDetectorMinConfidence - min_confidence:{}",
+            confidence
+        );
+        self.repository
+            .config_detector_min_confidence(confidence, chat_id)
+            .await;
+        self.send_success(
+            "Detector min confidence config updated successfully",
+            chat_id,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn config_detector_types_cmd(
+        &self,
+        chat_id: ChatId,
+        types: Vec<ObjectClass>,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command ConfigDetectorTypes - types:{}",
+            object_classes_to_string(&types),
+        );
+        self.repository
+            .config_detector_types(types, chat_id)
+            .await;
+        self.send_success(
+            "Detector types config updated successfully",
+            chat_id,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn get_config(&self, chat_id: ChatId) {
+        info!("command GetConfig");
+        let config = self.repository.get_config().await;
+        let available_types = self.repository.get_detector_types().await;
+        let message = format!(
+            r#"
+CURRENT CONFIG
+🔄 Polling seconds: {}
+📢 Between seconds: {}
+🚨 Send sync errors: {}
+🔄 Auto renewal: {}
+🎞️ Recording clip seconds: {}
+🕵🏽 Detector enabled: {}
+🎯 Detector min confidence: {}
+🔎 Detection types: {}
+* available types: {}
+"#,
+            config.polling_seconds,
+            config.between_seconds,
+            config.send_errors,
+            config.auto_renewal,
+            config.recording_clip,
+            config.detector.enable,
+            config.detector.min_confidence,
+            object_classes_to_string(&config.detector.types),
+            object_classes_to_string(&available_types),
+        );
+        self.notifier
+            .send_text_message(message, vec![chat_id])
+            .await;
+    }
+
+    async fn reset_config(&self, chat_id: ChatId) {
+        info!("command ResetConfig");
+        self.repository.reset_config().await;
+        self.get_config(chat_id).await;
     }
 
     async fn fix_snapshot_uri_cmd(
@@ -286,7 +392,7 @@ impl CommandProcessor for AppCommandProcessor {
             Some(camera) => camera,
             None => {
                 let error = format!("cannot find camera with id: {}", camera_id);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -307,24 +413,18 @@ impl CommandProcessor for AppCommandProcessor {
                         .await
                     {
                         Ok(_) => {
-                            let message = format!("camera snapshot uri fixed:{}", fixed_uri);
-                            info!("{}", message);
-                            let _ = self
-                                .notifier
-                                .send_text_message(message, vec![chat_id])
-                                .await;
+                            let message = format!("Camera snapshot uri fixed:{}", fixed_uri);
+                            self.send_success(&message, chat_id).await;
                         }
                         Err(err) => {
-                            let error = format!("{}", err);
-                            self.print_and_send_error(&error, chat_id).await;
-                            anyhow::bail!(error);
+                            self.send_error(&err.to_string(), chat_id).await;
+                            anyhow::bail!(err.to_string());
                         }
                     }
                 }
                 Err(err) => {
-                    let error = format!("{}", err);
-                    self.print_and_send_error(&error, chat_id).await;
-                    anyhow::bail!(error);
+                    self.send_error(&err.to_string(), chat_id).await;
+                    anyhow::bail!(err.to_string());
                 }
             }
         } else {
@@ -336,23 +436,18 @@ impl CommandProcessor for AppCommandProcessor {
                         .await
                     {
                         Ok(_) => {
-                            let message = format!("camera snapshot uri resolved:{}", uri);
-                            info!("{}", message);
-                            let _ = self
-                                .notifier
-                                .send_text_message(message, vec![chat_id])
-                                .await;
+                            let message = format!("Camera snapshot uri resolved:{}", uri);
+                            self.send_success(&message, chat_id).await;
                         }
                         Err(err) => {
-                            let error = format!("{}", err);
-                            self.print_and_send_error(&error, chat_id).await;
-                            anyhow::bail!(error);
+                            self.send_error(&err.to_string(), chat_id).await;
+                            anyhow::bail!(err.to_string());
                         }
                     }
                 }
                 Err(err) => {
                     let error = format!("cannot resolve snapshot uri: {}", err);
-                    self.print_and_send_error(&error, chat_id).await;
+                    self.send_error(&error, chat_id).await;
                     anyhow::bail!(error);
                 }
             }
@@ -362,17 +457,13 @@ impl CommandProcessor for AppCommandProcessor {
 
     async fn enable_daily_report_cmd(&self, chat_id: ChatId, enable: bool) -> anyhow::Result<()> {
         if enable {
-            let _ = self
-                .notifier
-                .send_text_message("Subscribed to daily report".to_string(), vec![chat_id])
+            self.send_success("Subscribed to daily report", chat_id)
                 .await;
             self.repository
                 .subscribe_to_daily_report(chat_id, true)
                 .await;
         } else {
-            let _ = self
-                .notifier
-                .send_text_message("Unsubscribed from daily report".to_string(), vec![chat_id])
+            self.send_success("Unsubscribed from daily report", chat_id)
                 .await;
             self.repository
                 .unsubscribe_from_daily_report(chat_id, true)
@@ -397,7 +488,7 @@ impl CommandProcessor for AppCommandProcessor {
             Ok(client) => client,
             Err(err) => {
                 let error = format!("cannot connect to camera at {}: {}", uri, err);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -426,18 +517,12 @@ impl CommandProcessor for AppCommandProcessor {
             .await
         {
             Ok(_) => {
-                let _ = self
-                    .notifier
-                    .send_text_message(
-                        "Camera added successfully. Use /getcameras to see its id and /setcameraname to rename it.".to_string(),
-                        vec![chat_id],
-                    )
-                    .await;
+                let message = "Camera added successfully. Use /getcameras to see its id and /setcameraname to rename it.";
+                self.send_success(message, chat_id).await;
             }
             Err(err) => {
-                let error = format!("{}", err);
-                self.print_and_send_error(&error, chat_id).await;
-                anyhow::bail!(error);
+                self.send_error(&err.to_string(), chat_id).await;
+                anyhow::bail!(err.to_string());
             }
         }
 
@@ -452,14 +537,12 @@ impl CommandProcessor for AppCommandProcessor {
 
         match self.repository.delete_camera(camera_id).await {
             Ok(_) => {
-                let _ = self
-                    .notifier
-                    .send_text_message("Camera deleted successfully".to_string(), vec![chat_id])
-                    .await;
+                self.send_success("Camera deleted successfully", chat_id)
+                    .await
             }
             Err(err) => {
-                let error = format!("{}", err);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&err.to_string(), chat_id).await;
+                anyhow::bail!(err.to_string());
             }
         }
         Ok(())
@@ -481,7 +564,7 @@ impl CommandProcessor for AppCommandProcessor {
             Some(camera) => camera.onvif_client.get_connection_data().uri,
             None => {
                 let error = format!("camera {} not found", camera_id);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -493,7 +576,7 @@ impl CommandProcessor for AppCommandProcessor {
                     "cannot connect to camera {} with new credentials: {}",
                     camera_id, err
                 );
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 anyhow::bail!(error);
             }
         };
@@ -504,18 +587,12 @@ impl CommandProcessor for AppCommandProcessor {
             .await
         {
             Ok(_) => {
-                let _ = self
-                    .notifier
-                    .send_text_message(
-                        "Credentials updated successfully".to_string(),
-                        vec![chat_id],
-                    )
-                    .await;
+                self.send_success("Credentials updated successfully", chat_id)
+                    .await
             }
             Err(err) => {
-                let error = format!("{}", err);
-                self.print_and_send_error(&error, chat_id).await;
-                anyhow::bail!(error);
+                self.send_error(&err.to_string(), chat_id).await;
+                anyhow::bail!(err.to_string());
             }
         }
         Ok(())
@@ -526,18 +603,19 @@ impl CommandProcessor for AppCommandProcessor {
         chat_id: ChatId,
         message_id: MessageId,
         camera_id: CameraId,
-        time: DateTime<Utc>,
+        event_time: DateTime<Utc>,
+        clip_seconds: Duration,
     ) -> Result<(), DownloadRecordingError> {
         info!(
             "command Download - chat_id:{} camera_id:{} time:{}",
-            chat_id, camera_id, time
+            chat_id, camera_id, event_time
         );
 
         let mut camera_data = match self.repository.get_camera(camera_id).await {
             Some(camera) => camera,
             None => {
                 let error = format!("camera {} not found", camera_id);
-                self.print_and_send_error(&error, chat_id).await;
+                self.send_error(&error, chat_id).await;
                 return Err(DownloadRecordingError::CameraNotFound);
             }
         };
@@ -547,16 +625,14 @@ impl CommandProcessor for AppCommandProcessor {
         }
 
         if let Some(api_camera_client) = camera_data.api_camera_client {
-            let event_time = time - chrono::Duration::seconds(10);
-            let clip_time = chrono::Duration::seconds(10);
             let recordings = match api_camera_client
-                .get_recordings(event_time, clip_time)
+                .get_recordings(event_time, clip_seconds)
                 .await
             {
                 Ok(recordings) => recordings,
                 Err(err) => {
                     tracing::error!("error getting recordings. {}", err);
-                    if event_time + clip_time + chrono::Duration::minutes(5) > Utc::now() {
+                    if event_time + clip_seconds + chrono::Duration::minutes(5) > Utc::now() {
                         return Err(DownloadRecordingError::NoRecordingsYet);
                     }
                     return Err(DownloadRecordingError::NoRecordings);
@@ -582,14 +658,14 @@ impl CommandProcessor for AppCommandProcessor {
             let target_name = format!(
                 "{}_{}_{}",
                 camera_id,
-                time.timestamp_millis(),
+                event_time.timestamp_millis(),
                 rand::random::<u32>()
             );
             match api_camera_client
                 .download_recording(
                     recordings.first().unwrap(),
                     event_time,
-                    clip_time,
+                    clip_seconds,
                     target_name,
                 )
                 .await

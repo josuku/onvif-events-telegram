@@ -9,13 +9,15 @@ pub async fn renew_subscriptions(repository: Arc<MemoryRepository>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(RENEW_INTERVAL_SECS)).await;
 
-        let cameras = repository.get_cameras().await;
-        for camera in cameras.into_iter().filter(|c| !c.subscriptors.is_empty()) {
-            info!("renewing subscription for camera:{}", camera.name);
-            camera
-                .onvif_client
-                .renew_subscription(PULL_SUBSCRIPTION_TIMEOUT)
-                .await;
+        if repository.get_config().await.auto_renewal {
+            let cameras = repository.get_cameras().await;
+            for camera in cameras.into_iter().filter(|c| !c.subscriptors.is_empty()) {
+                info!("renewing subscription for camera:{}", camera.name);
+                camera
+                    .onvif_client
+                    .renew_subscription(PULL_SUBSCRIPTION_TIMEOUT)
+                    .await;
+            }
         }
     }
 }

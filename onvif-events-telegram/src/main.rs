@@ -1,5 +1,4 @@
 mod app_command_processor;
-mod config;
 mod daily_report;
 mod detection_checker;
 mod subscription_manager;
@@ -8,10 +7,10 @@ use crate::app_command_processor::AppCommandProcessor;
 use crate::daily_report::manage_daily_report;
 use crate::detection_checker::check_for_detections_in_cameras;
 use crate::subscription_manager::{close_subscriptions, renew_subscriptions};
+use app_core::domain::config::AppConfig;
 use app_core::domain::event_bus::EventBus;
 use app_core::traits::object_detector::ObjectDetector;
 use app_core::traits::{command_processor::CommandProcessor, notifier::Notifier};
-use config::AppConfig;
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
 use std::fs::OpenOptions;
@@ -36,11 +35,7 @@ async fn main() {
 
     let repo_store = Arc::new(DbStore::new());
     repo_store.create_tables();
-    let repository = Arc::new(MemoryRepository::new(
-        config.default_polling_seconds,
-        config.default_between_seconds,
-        repo_store,
-    ));
+    let repository = Arc::new(MemoryRepository::new(config.bot_config, repo_store));
     repository
         .load_from_store()
         .await
@@ -56,14 +51,9 @@ async fn main() {
         notifier.clone(),
     ));
 
-    let object_detector: Option<Arc<Mutex<dyn ObjectDetector>>> = if config.detector.enable {
-        Some(Arc::new(Mutex::new(
-            UltralyticsDetector::new("./models/yolo11n.onnx", config.detector.min_confidence)
-                .expect("cannot create object detector"),
-        )))
-    } else {
-        None
-    };
+    let object_detector: Arc<Mutex<dyn ObjectDetector>> = Arc::new(Mutex::new(
+        UltralyticsDetector::new("./models/yolo11n.onnx").expect("cannot create object detector"),
+    ));
 
     let telegram_bot = Arc::new(TelegramBot::new(
         config.telegram.bot_token.clone(),
@@ -71,12 +61,13 @@ async fn main() {
         app_command_processor,
         notifier.clone(),
         event_bus.clone(),
+        repository.clone(),
     ));
 
     select! {
         _ = start_bot(telegram_bot) => (),
         _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector) => (),
-        _ = renew_subscriptions(repository.clone()), if config.auto_renewal => (),
+        _ = renew_subscriptions(repository.clone()) => (),
         _ = shutdown_signal() => {
             close_subscriptions(repository).await;
             info!("Closing app")
@@ -102,7 +93,7 @@ async fn start_polling(
     notifier: Arc<dyn Notifier>,
     repository: Arc<MemoryRepository>,
     event_bus: Arc<EventBus>,
-    object_detector: Option<Arc<Mutex<dyn ObjectDetector>>>,
+    object_detector: Arc<Mutex<dyn ObjectDetector>>,
 ) {
     let mut last_polling = chrono::Local::now();
     loop {
@@ -117,7 +108,7 @@ async fn start_polling(
         last_polling = chrono::Local::now();
 
         tokio::time::sleep(tokio::time::Duration::from_secs(
-            repository.get_polling_seconds().await,
+            repository.get_config().await.polling_seconds,
         ))
         .await;
     }

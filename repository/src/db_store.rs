@@ -1,5 +1,12 @@
 use anyhow::bail;
-use app_core::{CameraId, ChatId, SubscriptionId, domain::camera::CameraConnectionData};
+use app_core::{
+    CameraId, ChatId, SubscriptionId,
+    domain::{
+        camera::CameraConnectionData,
+        config::{BotConfig, DetectorConfig},
+        object::{object_classes_to_string, string_to_object_classes},
+    },
+};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tracing::{error, info};
@@ -70,7 +77,21 @@ impl DbStore {
         ";
         connection.execute(query, ()).unwrap();
 
-        // TODO polling seconds in config table?
+        query = "
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                polling_seconds INTEGER NOT NULL,
+                between_seconds INTEGER NOT NULL,
+                send_errors BOOLEAN NOT NULL,
+                auto_renewal BOOLEAN NOT NULL,
+                recording_clip INTEGER NOT NULL,
+                detector_enable BOOLEAN NOT NULL,
+                detector_min_confidence DECIMAL NOT NULL,
+                detector_types TEXT NOT NULL,
+                updated_by_chat_id INTEGER NOT NULL
+            );
+        ";
+        connection.execute(query, ()).unwrap();
     }
 
     pub fn get_cameras(&self) -> anyhow::Result<Vec<DbCamera>> {
@@ -299,5 +320,66 @@ impl DbStore {
         }
 
         Ok(chat_ids)
+    }
+
+    pub fn update_config(&self, chat_id: ChatId, bot_config: &BotConfig) {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO settings 
+                        (id, polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types, updated_by_chat_id)
+                      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
+            (bot_config.polling_seconds as i64,
+                    bot_config.between_seconds as i64,
+                    bot_config.send_errors,
+                    bot_config.auto_renewal,
+                    bot_config.recording_clip,
+                    bot_config.detector.enable,
+                    bot_config.detector.min_confidence,
+                    object_classes_to_string(&bot_config.detector.types),
+                    chat_id)
+            )
+            .unwrap();
+    }
+
+    pub fn get_config(&self) -> anyhow::Result<Option<BotConfig>> {
+        let connection = self.connection.lock().unwrap();
+        let mut stmt = connection.prepare(
+            "SELECT polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types FROM settings WHERE id = 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            let polling_seconds: i64 = row.get(0)?;
+            let between_seconds: i64 = row.get(1)?;
+            let send_errors: bool = row.get(2)?;
+            let auto_renewal: bool = row.get(3)?;
+            let recording_clip: i64 = row.get(4)?;
+            let detector_enable: bool = row.get(5)?;
+            let detector_min_confidence: f32 = row.get(6)?;
+            let object_types: String = row.get(7)?;
+            Ok(BotConfig {
+                polling_seconds: polling_seconds as u64,
+                between_seconds: between_seconds as u64,
+                send_errors,
+                auto_renewal,
+                recording_clip: recording_clip as u64,
+                detector: DetectorConfig {
+                    enable: detector_enable,
+                    min_confidence: detector_min_confidence,
+                    types: string_to_object_classes(&object_types),
+                },
+            })
+        })?;
+        if let Some(config) = rows.next() {
+            Ok(Some(config?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_config(&self) {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute("DELETE FROM settings WHERE id = 1", [])
+            .unwrap();
     }
 }

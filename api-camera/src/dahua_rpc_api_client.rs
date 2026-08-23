@@ -96,11 +96,11 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
     async fn download_recording(
         &self,
         recording: &Recording,
-        time: DateTime<Utc>,
+        event_time: DateTime<Utc>,
         clip_time: Duration,
         target_name: String,
     ) -> anyhow::Result<String> {
-        let (offset_secs, duration_secs) = compute_clip_window(recording, time, clip_time)?;
+        let (offset_secs, duration_secs) = compute_clip_window(recording, event_time, clip_time)?;
 
         let mut client = self.connect_and_login().await?;
         tracing::info!("download_recording -> connected to Dahua camera");

@@ -1,10 +1,8 @@
 use app_core::{
-    domain::event_bus::EventBus,
-    make_caption, make_error,
-    traits::{command_processor::CommandProcessor, notifier::Notifier},
-    CameraId,
+    CameraId, domain::{event_bus::EventBus, object::string_to_object_classes}, make_caption, make_error, traits::{command_processor::CommandProcessor, notifier::Notifier},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use repository::memory_repository::MemoryRepository;
 use std::sync::Arc;
 use teloxide::{
     dispatching::{Dispatcher, HandlerExt, UpdateFilterExt},
@@ -35,10 +33,19 @@ pub enum BotCommand {
     Subscribe(CameraId),
     Unsubscribe(CameraId),
     GetSnapshot(String),
-    // TODO GetSnapshotEvery(CameraId, String), // get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)
-    SetPollingTime(u64),
-    SetBetweenTime(u64),
     DailyReport(bool),
+    // TODO GetSnapshotEvery(CameraId, String), // get snapshot of camera id every time period. params: camera_id, time (30s, 1m, ...)
+    // Config
+    GetConfig,
+    ResetConfig,
+    ConfigPollingTime(u64),
+    ConfigBetweenTime(u64),
+    ConfigSendErrors(bool),
+    ConfigAutoRenewal(bool),
+    ConfigRecordingClip(u64),
+    ConfigDetectorEnable(bool),
+    ConfigDetectorMinConfidence(f32),
+    ConfigDetectorTypes(String),
 }
 
 #[derive(Clone)]
@@ -48,6 +55,7 @@ pub struct TelegramBot {
     command_processor: Arc<dyn CommandProcessor>,
     notifier: Arc<dyn Notifier>,
     event_bus: Arc<EventBus>,
+    repository: Arc<MemoryRepository>,
 }
 
 impl TelegramBot {
@@ -57,6 +65,7 @@ impl TelegramBot {
         command_processor: Arc<dyn CommandProcessor>,
         notifier: Arc<dyn Notifier>,
         event_bus: Arc<EventBus>,
+        repository: Arc<MemoryRepository>,
     ) -> Self {
         Self {
             client: Bot::new(bot_token),
@@ -64,6 +73,7 @@ impl TelegramBot {
             command_processor,
             notifier,
             event_bus,
+            repository,
         }
     }
 
@@ -91,6 +101,7 @@ impl TelegramBot {
             .dependencies(dptree::deps![
                 self.allowed_chat_ids.clone(),
                 self.command_processor.clone(),
+                self.repository.clone(),
                 self.clone()
             ])
             .build()
@@ -153,6 +164,7 @@ async fn process_command(
     msg: teloxide::types::Message,
     allowed_chat_ids: Vec<String>,
     command_processor: Arc<dyn CommandProcessor>,
+    _repository: Arc<MemoryRepository>,
     cmd: BotCommand,
 ) -> teloxide::requests::ResponseResult<()> {
     let chat_id = msg.chat.id.0;
@@ -222,14 +234,40 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
-        BotCommand::SetPollingTime(seconds) => command_processor
-            .set_polling_time_cmd(chat_id, seconds)
+        BotCommand::ConfigPollingTime(seconds) => command_processor
+            .config_polling_time_cmd(chat_id, seconds)
             .await
             .map_err(anyhow_to_response_error)?,
-        BotCommand::SetBetweenTime(seconds) => command_processor
-            .set_between_time_cmd(chat_id, seconds)
+        BotCommand::ConfigBetweenTime(seconds) => command_processor
+            .config_between_time_cmd(chat_id, seconds)
             .await
             .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigSendErrors(send_errors) => command_processor
+            .config_send_errors_cmd(chat_id, send_errors)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigAutoRenewal(enable) => command_processor
+            .config_auto_renewal_cmd(chat_id, enable)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigRecordingClip(seconds) => command_processor
+            .config_recording_clip_cmd(chat_id, seconds)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigDetectorEnable(enable) => command_processor
+            .config_detector_enable_cmd(chat_id, enable)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigDetectorMinConfidence(min_confidence) => command_processor
+            .config_detector_min_confidence_cmd(chat_id, min_confidence)
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::ConfigDetectorTypes(types) => command_processor
+            .config_detector_types_cmd(chat_id, string_to_object_classes(&types))
+            .await
+            .map_err(anyhow_to_response_error)?,
+        BotCommand::GetConfig => command_processor.get_config(chat_id).await,
+        BotCommand::ResetConfig => command_processor.reset_config(chat_id).await,
         BotCommand::FixSnapshot(camera_id) => command_processor
             .fix_snapshot_uri_cmd(chat_id, camera_id)
             .await
@@ -294,6 +332,7 @@ async fn process_callback(
     callback: CallbackQuery,
     allowed_chat_ids: Vec<String>,
     command_processor: Arc<dyn CommandProcessor>,
+    repository: Arc<MemoryRepository>,
 ) -> teloxide::requests::ResponseResult<()> {
     let Some(message) = &callback.message else {
         error!("Recordings not found");
@@ -359,9 +398,16 @@ async fn process_callback(
     .await;
 
     let bot_clone = bot.clone();
+    let config = repository.get_config().await;
     tokio::spawn(async move {
         match command_processor
-            .download_recording(chat_id, message_id.0, camera_id, time)
+            .download_recording(
+                chat_id,
+                message_id.0,
+                camera_id,
+                time,
+                Duration::seconds(config.recording_clip as i64),
+            )
             .await
         {
             Ok(_) => {
@@ -424,9 +470,20 @@ fn help_text() -> String {
 /subscribe `camera_id` \\- subscribe to camera notifications
 /unsubscribe `camera_id` \\- unsubscribe from camera notifications
 /getsnapshot `[camera_id]` \\- get snapshot of one or all cameras
-/setpollingtime `seconds` \\- set detection polling interval
-/setbetweentime `seconds` \\- set minimum time between notifications
-/dailyreport `true|false` \\- enable or disable daily status report"
+/dailyreport `true|false` \\- enable or disable daily status report
+
+🌣 *CONFIG*
+/getconfig \\- shows current config
+/resetconfig \\- restore default config (yaml)
+/configpollingtime `seconds` \\- set detection polling interval
+/configbetweentime `seconds` \\- set minimum time between notifications
+/configsenderrors `true|false` \\- enable or disable sync errors reception
+/configautorenewal `true|false` \\- enable or disable onvif sessions renewal
+/configrecordingclip `seconds` \\- recording clip seconds to download
+/configdetectorenable `true|false` \\- enable or disable detector
+/configdetectorminconfidence `0-1` \\- set detector min confidence
+/configdetectortypes `person,cat,...` \\- set detector types
+"
         .to_string()
 }
 

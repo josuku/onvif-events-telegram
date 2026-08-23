@@ -1,5 +1,5 @@
 use app_core::{
-    domain::object::{BoundingBox, Object},
+    domain::object::{BoundingBox, Object, ObjectClass},
     traits::object_detector::ObjectDetector,
 };
 use tracing::{debug, info};
@@ -7,23 +7,24 @@ use ultralytics_inference::YOLOModel;
 
 pub struct UltralyticsDetector {
     model: YOLOModel,
-    min_confidence: f32,
 }
 
 impl UltralyticsDetector {
-    pub fn new(model_path: &str, min_confidence: f32) -> anyhow::Result<Self> {
+    pub fn new(model_path: &str) -> anyhow::Result<Self> {
         info!("UltralyticsDetector - Loading model...");
         let model = ultralytics_inference::YOLOModel::load(model_path)?;
 
-        Ok(Self {
-            model,
-            min_confidence,
-        })
+        Ok(Self { model })
     }
 }
 
 impl ObjectDetector for UltralyticsDetector {
-    fn detect(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<Object>> {
+    fn detect(
+        &mut self,
+        bytes: &[u8],
+        min_confidence: f32,
+        types: &[ObjectClass],
+    ) -> anyhow::Result<Vec<Object>> {
         debug!("UltralyticsDetector - Loading image ...");
         let mut detections = Vec::new();
 
@@ -37,7 +38,7 @@ impl ObjectDetector for UltralyticsDetector {
             if let Some(boxes) = &result.boxes {
                 for i in 0..boxes.len() {
                     let confidence = boxes.conf()[i];
-                    if confidence < self.min_confidence {
+                    if confidence < min_confidence {
                         continue;
                     }
 
@@ -46,6 +47,10 @@ impl ObjectDetector for UltralyticsDetector {
                         .names
                         .get(&class_id)
                         .map_or("unknown", |s| s.as_str());
+
+                    if !types.contains(&class_name.into()) {
+                        continue;
+                    }
 
                     let bbox = BoundingBox {
                         x1: boxes.xyxy()[[i, 0]],

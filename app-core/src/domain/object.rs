@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Object {
     pub class: ObjectClass,
@@ -13,7 +15,8 @@ pub struct BoundingBox {
     pub y2: f32, // Y lower right (px)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
 pub enum ObjectClass {
     Person,
     Bicycle,
@@ -110,10 +113,10 @@ impl From<&str> for ObjectClass {
             "train" => Self::Train,
             "truck" => Self::Truck,
             "boat" => Self::Boat,
-            "traffic light" => Self::TrafficLight,
-            "fire hydrant" => Self::FireHydrant,
-            "stop sign" => Self::StopSign,
-            "parking meter" => Self::ParkingMeter,
+            "traffic-light" => Self::TrafficLight,
+            "fire-hydrant" => Self::FireHydrant,
+            "stop-sign" => Self::StopSign,
+            "parking-meter" => Self::ParkingMeter,
             "bench" => Self::Bench,
             "bird" => Self::Bird,
             "cat" => Self::Cat,
@@ -133,15 +136,15 @@ impl From<&str> for ObjectClass {
             "frisbee" => Self::Frisbee,
             "skis" => Self::Skis,
             "snowboard" => Self::Snowboard,
-            "sports ball" => Self::SportsBall,
+            "sports-ball" => Self::SportsBall,
             "kite" => Self::Kite,
-            "baseball bat" => Self::BaseballBat,
-            "baseball glove" => Self::BaseballGlove,
+            "baseball-bat" => Self::BaseballBat,
+            "baseball-glove" => Self::BaseballGlove,
             "skateboard" => Self::Skateboard,
             "surfboard" => Self::Surfboard,
-            "tennis racket" => Self::TennisRacket,
+            "tennis-racket" => Self::TennisRacket,
             "bottle" => Self::Bottle,
-            "wine glass" => Self::WineGlass,
+            "wine-glass" => Self::WineGlass,
             "cup" => Self::Cup,
             "fork" => Self::Fork,
             "knife" => Self::Knife,
@@ -153,7 +156,7 @@ impl From<&str> for ObjectClass {
             "orange" => Self::Orange,
             "broccoli" => Self::Broccoli,
             "carrot" => Self::Carrot,
-            "hot dog" => Self::HotDog,
+            "hot-dog" => Self::HotDog,
             "pizza" => Self::Pizza,
             "donut" => Self::Donut,
             "cake" => Self::Cake,
@@ -161,14 +164,14 @@ impl From<&str> for ObjectClass {
             "couch" => Self::Couch,
             "potted plant" => Self::PottedPlant,
             "bed" => Self::Bed,
-            "dining table" => Self::DiningTable,
+            "dining-table" => Self::DiningTable,
             "toilet" => Self::Toilet,
             "tv" => Self::Tv,
             "laptop" => Self::Laptop,
             "mouse" => Self::Mouse,
             "remote" => Self::Remote,
             "keyboard" => Self::Keyboard,
-            "cell phone" => Self::CellPhone,
+            "cell-phone" => Self::CellPhone,
             "microwave" => Self::Microwave,
             "oven" => Self::Oven,
             "toaster" => Self::Toaster,
@@ -178,8 +181,8 @@ impl From<&str> for ObjectClass {
             "clock" => Self::Clock,
             "vase" => Self::Vase,
             "scissors" => Self::Scissors,
-            "teddy bear" => Self::TeddyBear,
-            "hair drier" => Self::HairDrier,
+            "teddy-bear" => Self::TeddyBear,
+            "hair-drier" => Self::HairDrier,
             "toothbrush" => Self::Toothbrush,
             _ => Self::Unknown,
         }
@@ -188,7 +191,8 @@ impl From<&str> for ObjectClass {
 
 impl std::fmt::Display for ObjectClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        let value = serde_json::to_string(self).map_err(|_| std::fmt::Error)?;
+        write!(f, "{}", value.trim_matches('"'))
     }
 }
 
@@ -206,4 +210,20 @@ impl std::fmt::Display for Object {
         //     self.bbox.y2,
         // )
     }
+}
+
+pub fn object_classes_to_string(types: &[ObjectClass]) -> String {
+    types
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn string_to_object_classes(value: &str) -> Vec<ObjectClass> {
+    value
+        .trim()
+        .split(',')
+        .map(|value| ObjectClass::from(value.trim()))
+        .collect()
 }

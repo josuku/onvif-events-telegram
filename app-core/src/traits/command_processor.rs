@@ -1,6 +1,6 @@
-use crate::{CameraId, ChatId, MessageId};
+use crate::{CameraId, ChatId, MessageId, domain::object::ObjectClass};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 #[async_trait]
@@ -20,8 +20,29 @@ pub trait CommandProcessor: Send + Sync {
         chat_id: ChatId,
         camera_id: Option<CameraId>,
     ) -> anyhow::Result<()>;
-    async fn set_polling_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
-    async fn set_between_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
+    async fn config_polling_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
+    async fn config_between_time_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
+    async fn config_send_errors_cmd(
+        &self,
+        chat_id: ChatId,
+        send_errors: bool,
+    ) -> anyhow::Result<()>;
+    async fn config_auto_renewal_cmd(&self, chat_id: ChatId, enable: bool) -> anyhow::Result<()>;
+    async fn config_recording_clip_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()>;
+    async fn config_detector_enable_cmd(&self, chat_id: ChatId, enable: bool)
+    -> anyhow::Result<()>;
+    async fn config_detector_min_confidence_cmd(
+        &self,
+        chat_id: ChatId,
+        confidence: f32,
+    ) -> anyhow::Result<()>;
+    async fn config_detector_types_cmd(
+        &self,
+        chat_id: ChatId,
+        types: Vec<ObjectClass>,
+    ) -> anyhow::Result<()>;
+    async fn get_config(&self, chat_id: ChatId);
+    async fn reset_config(&self, chat_id: ChatId);
     async fn fix_snapshot_uri_cmd(
         &self,
         chat_id: ChatId,
@@ -48,7 +69,8 @@ pub trait CommandProcessor: Send + Sync {
         chat_id: ChatId,
         message_id: MessageId,
         camera_id: CameraId,
-        time: DateTime<Utc>,
+        event_time: DateTime<Utc>,
+        clip_seconds: Duration,
     ) -> Result<(), DownloadRecordingError>;
 }
 

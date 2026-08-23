@@ -3,7 +3,9 @@ use app_core::{
     CameraId, ChatId,
     domain::{
         camera::{CameraConnectionData, CameraData, CameraStatus},
+        config::BotConfig,
         discovery_device::DiscoveryDevice,
+        object::ObjectClass,
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,18 +20,18 @@ use app_core::traits::onvif_camera_client::OnvifCameraClient;
 
 pub struct MemoryRepository {
     cameras: Mutex<HashMap<CameraId, CameraData>>,
-    polling_seconds: Mutex<u64>,
-    between_seconds: Mutex<u64>,
+    config: Mutex<BotConfig>,
+    default_config: Mutex<BotConfig>,
     repo_store: Arc<DbStore>,
     daily_report_subscriptors: Mutex<Vec<ChatId>>,
 }
 
 impl MemoryRepository {
-    pub fn new(polling_seconds: u64, between_seconds: u64, repo_store: Arc<DbStore>) -> Self {
+    pub fn new(bot_config: BotConfig, repo_store: Arc<DbStore>) -> Self {
         Self {
             cameras: Mutex::new(HashMap::new()),
-            polling_seconds: Mutex::new(polling_seconds),
-            between_seconds: Mutex::new(between_seconds),
+            config: Mutex::new(bot_config.clone()),
+            default_config: Mutex::new(bot_config),
             repo_store,
             daily_report_subscriptors: Mutex::new(Vec::new()),
         }
@@ -43,6 +45,8 @@ impl MemoryRepository {
                 Vec::new()
             }
         };
+
+        info!("Creating onvif camera clients for every camera...");
 
         for camera in cameras {
             let client =
@@ -82,10 +86,21 @@ impl MemoryRepository {
                     let _ = self.subscribe_to_daily_report(chat_id, false).await;
                 }
             }
-            Err(err) => {
-                error!("cannot load daily report subscriptors: {}", err);
-            }
+            Err(err) => error!("cannot load daily report subscriptors: {}", err),
         };
+
+        match self.repo_store.get_config() {
+            Ok(repo_config) => {
+                if let Some(repo_config) = repo_config {
+                    let mut config = self.config.lock().await;
+                    info!("found db config. loading... {:?}", repo_config);
+                    *config = repo_config;
+                } else {
+                    warn!("not found db config. loading config.yaml default values");
+                }
+            }
+            Err(err) => error!("cannot load db config: {}", err),
+        }
 
         Ok(())
     }
@@ -105,16 +120,6 @@ impl MemoryRepository {
     pub async fn get_camera(&self, camera_id: CameraId) -> Option<CameraData> {
         let cameras = self.cameras.lock().await;
         cameras.get(&camera_id).cloned()
-    }
-
-    pub async fn get_polling_seconds(&self) -> u64 {
-        let polling_seconds = self.polling_seconds.lock().await;
-        *polling_seconds
-    }
-
-    pub async fn get_between_seconds(&self) -> u64 {
-        let between_seconds = self.between_seconds.lock().await;
-        *between_seconds
     }
 
     pub async fn get_last_notification_time(
@@ -280,14 +285,69 @@ impl MemoryRepository {
         }
     }
 
-    pub async fn set_polling_seconds(&self, seconds: u64) {
-        let mut polling_seconds = self.polling_seconds.lock().await;
-        *polling_seconds = seconds;
+    pub async fn get_config(&self) -> BotConfig {
+        let config = self.config.lock().await;
+        config.clone()
     }
 
-    pub async fn set_between_seconds(&self, seconds: u64) {
-        let mut between_seconds = self.between_seconds.lock().await;
-        *between_seconds = seconds;
+    pub async fn reset_config(&self) {
+        let mut config = self.config.lock().await;
+        let default_config = self.default_config.lock().await;
+        let _ = self.repo_store.get_config();
+        *config = default_config.clone()
+    }
+
+    pub async fn config_polling_seconds(&self, seconds: u64, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.polling_seconds = seconds;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_between_seconds(&self, seconds: u64, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.between_seconds = seconds;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_send_errors(&self, value: bool, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.send_errors = value;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_auto_renewal(&self, value: bool, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.auto_renewal = value;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_recording_clip(&self, seconds: u64, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.recording_clip = seconds;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_detector_enable(&self, value: bool, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.detector.enable = value;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_detector_min_confidence(&self, value: f32, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.detector.min_confidence = value;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn config_detector_types(&self, types: Vec<ObjectClass>, chat_id: ChatId) {
+        let mut config = self.config.lock().await;
+        config.detector.types = types;
+        self.repo_store.update_config(chat_id, &config);
+    }
+
+    pub async fn get_detector_types(&self) -> Vec<ObjectClass> {
+        let default_config = self.default_config.lock().await;
+        default_config.detector.types.clone()
     }
 
     pub async fn update_uri_from_camera(

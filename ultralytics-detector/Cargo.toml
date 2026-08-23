@@ -11,7 +11,6 @@ tracing = "0.1"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
 ultralytics-inference = "0.0.33"
 image = "0.25"
-
-app-core = { path = "../app-core" }
 tempfile = "3.27.0"
 
+app-core = { path = "../app-core" }

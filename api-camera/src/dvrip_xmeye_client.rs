@@ -122,11 +122,11 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
     async fn download_recording(
         &self,
         recording: &Recording,
-        time: DateTime<Utc>,
+        event_time: DateTime<Utc>,
         clip_time: Duration,
         target_name: String,
     ) -> anyhow::Result<String> {
-        let (start_time, end_time) = get_clip_interval(time, clip_time);
+        let (start_time, end_time) = get_clip_interval(event_time, clip_time);
 
         if (end_time - start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
             anyhow::bail!(

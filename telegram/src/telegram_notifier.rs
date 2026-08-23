@@ -49,7 +49,7 @@ impl Notifier for TelegramNotifier {
         let file = InputFile::memory(picture.clone()).file_name("new_file.jpg");
 
         let go_to_recording = InlineKeyboardMarkup::new([[InlineKeyboardButton::callback(
-            "📹 Get Recording ±10s",
+            "📹 Get Recording",
             format!("recording|{}|{}", camera_id, time.to_rfc3339()),
         )]]);
 
@@ -78,7 +78,7 @@ impl Notifier for TelegramNotifier {
                 .repository
                 .get_last_notification_time(camera_id, chat_id)
                 .await;
-            let between_seconds = self.repository.get_between_seconds().await;
+            let between_seconds = self.repository.get_config().await.between_seconds;
 
             if last_notification_time.is_none()
                 || chrono::Utc::now().timestamp() - last_notification_time.unwrap().timestamp()

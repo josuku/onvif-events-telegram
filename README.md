@@ -50,9 +50,10 @@ winget install BtbN.FFmpeg.LGPL
 Or copy ffmpeg.exe in the same directory of the bot .exe file
 
 TODOs
+- add manual detection (by camera or all of them batched)
 - get camera info and available onvif services
 - add oxvif implementation for onvif camera client
-- save polling and between timeouts in SQLite
+- add ort implementation for object detection
 - reboot camera command (maybe indicate if polling has errors)
 - add getvideo command indicating camera and number or seconds or minutes
 - add zoom in-out command if possible (for varifocal)
