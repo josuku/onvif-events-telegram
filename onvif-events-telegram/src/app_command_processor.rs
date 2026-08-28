@@ -1,7 +1,7 @@
 use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
 use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
 use app_core::domain::camera::{CameraData, CameraStatus};
-use app_core::domain::object::{ObjectClass, object_classes_to_string};
+use app_core::domain::object::{object_classes_to_string, ObjectClass};
 use app_core::helpers::network::is_reachable;
 use app_core::traits::api_camera_client::ApiCameraClient;
 use app_core::traits::command_processor::DownloadRecordingError;
@@ -109,10 +109,21 @@ impl CommandProcessor for AppCommandProcessor {
         Ok(())
     }
 
-    async fn get_cameras_cmd(&self, chat_id: ChatId) -> anyhow::Result<()> {
+    async fn get_cameras_cmd(&self, chat_id: ChatId, extended: bool) -> anyhow::Result<()> {
         info!("command GetCameras - chat_id:{}", chat_id);
 
+        self.notifier
+            .send_text_message("⏳ Start devices discovery".to_string(), vec![chat_id])
+            .await;
+
         let discovered_devices = OnvifDiscoveryClient::camera_discovery().await;
+
+        self.notifier
+            .send_text_message(
+                format!("💡 Discovered {} devices", discovered_devices.len()),
+                vec![chat_id],
+            )
+            .await;
 
         if let Err(err) = self
             .repository
@@ -140,7 +151,12 @@ impl CommandProcessor for AppCommandProcessor {
                 } else {
                     "🟠"
                 };
-                lines.push(format!("{status} {camera}"));
+                let camera_info = if extended {
+                    camera.display_full().await
+                } else {
+                    camera.display_short()
+                };
+                lines.push(format!("{status} {camera_info}"));
             }
             self.notifier
                 .send_text_message(lines.join("\n"), vec![chat_id])
@@ -330,14 +346,9 @@ impl CommandProcessor for AppCommandProcessor {
             "command ConfigDetectorTypes - types:{}",
             object_classes_to_string(&types),
         );
-        self.repository
-            .config_detector_types(types, chat_id)
+        self.repository.config_detector_types(types, chat_id).await;
+        self.send_success("Detector types config updated successfully", chat_id)
             .await;
-        self.send_success(
-            "Detector types config updated successfully",
-            chat_id,
-        )
-        .await;
         Ok(())
     }
 
@@ -495,27 +506,26 @@ CURRENT CONFIG
 
         let snapshot_uri = client.get_snapshot_uri().await.ok();
 
-        match self
-            .repository
-            .add_camera(CameraData {
-                id: 0, // 0 -> nueva cámara, el repositorio le asigna id
-                name: uri.to_string(),
-                address: uri.to_string(),
-                snapshot_uri,
-                onvif_client: Arc::new(client),
-                api_camera_client: None, // TODO
-                device_info: None,
-                subscriptors: Vec::new(),
-                status: CameraStatus {
-                    last_polling: None,
-                    last_error: None,
-                    last_error_notified: false,
-                    last_notification_by_chat_id: HashMap::new(),
-                    today_notifications: Vec::new(),
-                },
-            })
-            .await
-        {
+        let mut camera_data = CameraData {
+            id: 0, // 0 -> nueva cámara, el repositorio le asigna id
+            name: uri.to_string(),
+            address: uri.to_string(),
+            snapshot_uri,
+            onvif_client: Arc::new(client),
+            api_camera_client: None,
+            device_info: None,
+            subscriptors: Vec::new(),
+            status: CameraStatus {
+                last_polling: None,
+                last_error: None,
+                last_error_notified: false,
+                last_notification_by_chat_id: HashMap::new(),
+                today_notifications: Vec::new(),
+            },
+        };
+        camera_data.device_info = camera_data.get_device_info().await;
+
+        match self.repository.add_camera(camera_data).await {
             Ok(_) => {
                 let message = "Camera added successfully. Use /getcameras to see its id and /setcameraname to rename it.";
                 self.send_success(message, chat_id).await;
@@ -700,28 +710,31 @@ CURRENT CONFIG
 }
 
 async fn make_api_camera_client(camera_data: &mut CameraData) -> Option<Arc<dyn ApiCameraClient>> {
-    if let Ok(device_info) = camera_data.device_info().await {
-        match device_info.manufacturer.as_str() {
-            "Dahua" => {
-                return Some(Arc::new(DahuaRpcApiCameraClient::new(
+    match camera_data.get_device_info().await {
+        Some(device_info) => {
+            camera_data.device_info = Some(device_info.clone());
+            match device_info.manufacturer.as_str() {
+                "Dahua" => Some(Arc::new(DahuaRpcApiCameraClient::new(
                     camera_data.host(),
                     camera_data.username(),
                     camera_data.password(),
-                )))
-            }
-            "H264" => {
-                return Some(Arc::new(DvrIpXmeyeApiCameraClient::new(
+                ))),
+                "H264" => Some(Arc::new(DvrIpXmeyeApiCameraClient::new(
                     camera_data.host(),
                     camera_data.username(),
                     camera_data.password(),
-                )))
-            }
-            manufacturer => {
-                tracing::error!("download not implemented for this manufacturer: {manufacturer}")
+                ))),
+                manufacturer => {
+                    tracing::error!(
+                        "download not implemented for this manufacturer: {manufacturer}"
+                    );
+                    None
+                }
             }
         }
-    } else {
-        tracing::error!("cannot get device info to check which camera API to use");
+        None => {
+            tracing::error!("cannot get device info to check which camera API to use");
+            None
+        }
     }
-    None
 }

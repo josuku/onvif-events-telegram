@@ -1,5 +1,8 @@
 use app_core::{
-    CameraId, domain::{event_bus::EventBus, object::string_to_object_classes}, make_caption, make_error, traits::{command_processor::CommandProcessor, notifier::Notifier},
+    domain::{event_bus::EventBus, object::string_to_object_classes},
+    make_caption, make_error,
+    traits::{command_processor::CommandProcessor, notifier::Notifier},
+    CameraId,
 };
 use chrono::{DateTime, Duration, Utc};
 use repository::memory_repository::MemoryRepository;
@@ -23,7 +26,7 @@ pub enum BotCommand {
     // Help
     Help,
     // Cameras
-    GetCameras,
+    GetCameras(String),
     AddCamera(String),
     DeleteCamera(CameraId),
     SetCameraName(String),
@@ -183,10 +186,13 @@ async fn process_command(
                 .await
                 .map_err(|err| anyhow_to_response_error(anyhow::anyhow!(err.to_string())))?;
         }
-        BotCommand::GetCameras => command_processor
-            .get_cameras_cmd(chat_id)
-            .await
-            .map_err(anyhow_to_response_error)?,
+        BotCommand::GetCameras(value) => {
+            let full = value.to_ascii_lowercase().trim() == "extended";
+            command_processor
+                .get_cameras_cmd(chat_id, full)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
         BotCommand::SetCameraName(camera_id_and_name) => {
             let mut parts = camera_id_and_name.split_whitespace();
             let camera_id = match parts.next() {
@@ -460,6 +466,7 @@ fn help_text() -> String {
 
 📷 *CAMERAS*
 /getcameras \\- list all cameras
+/getcameras extended \\- list extended info of cameras
 /addcamera `uri` `username` `password` \\- add a camera manually e\\.g\\. http\\://192\\.168\\.1\\.50\\:8899 admin secret
 /deletecamera `camera_id` \\- delete a camera
 /setcameraname `camera_id name` \\- rename a camera
@@ -474,7 +481,7 @@ fn help_text() -> String {
 
 🌣 *CONFIG*
 /getconfig \\- shows current config
-/resetconfig \\- restore default config (yaml)
+/resetconfig \\- restore default config yaml
 /configpollingtime `seconds` \\- set detection polling interval
 /configbetweentime `seconds` \\- set minimum time between notifications
 /configsenderrors `true|false` \\- enable or disable sync errors reception

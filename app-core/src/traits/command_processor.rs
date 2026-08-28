@@ -6,7 +6,7 @@ use thiserror::Error;
 #[async_trait]
 pub trait CommandProcessor: Send + Sync {
     async fn help_cmd(&self, chat_id: ChatId, help_text: &str) -> anyhow::Result<()>;
-    async fn get_cameras_cmd(&self, chat_id: ChatId) -> anyhow::Result<()>;
+    async fn get_cameras_cmd(&self, chat_id: ChatId, extended: bool) -> anyhow::Result<()>;
     async fn set_camera_name_cmd(
         &self,
         chat_id: ChatId,

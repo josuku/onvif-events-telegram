@@ -49,18 +49,19 @@ impl MemoryRepository {
         info!("Creating onvif camera clients for every camera...");
 
         for camera in cameras {
-            let client =
+            let client = Arc::new(
                 create_onvif_camera_client(&camera.uri, &camera.username, &camera.password)
                     .await
-                    .map_err(|err| anyhow::anyhow!({ err }))?;
+                    .map_err(|err| anyhow::anyhow!({ err }))?,
+            );
 
-            self.add_camera(CameraData {
+            let mut camera_data = CameraData {
                 id: camera.id,
                 name: camera.name,
                 address: camera.address,
                 snapshot_uri: camera.snapshot_uri,
-                onvif_client: Arc::new(client),
-                api_camera_client: None, // TODO
+                onvif_client: client,
+                api_camera_client: None,
                 device_info: None,
                 subscriptors: Vec::new(),
                 status: CameraStatus {
@@ -70,8 +71,10 @@ impl MemoryRepository {
                     last_notification_by_chat_id: HashMap::new(),
                     today_notifications: Vec::new(),
                 },
-            })
-            .await?;
+            };
+            camera_data.device_info = camera_data.get_device_info().await;
+
+            self.add_camera(camera_data).await?;
 
             for subscriptor in camera.subscriptors {
                 let _ = self
@@ -476,26 +479,26 @@ impl MemoryRepository {
                         .map_err(|err| anyhow::anyhow!({ err }))?;
                 }
 
-                if let Err(err) = self
-                    .add_camera(CameraData {
-                        id: 0, // new camera, insert into store
-                        name: new_device.name.clone().unwrap_or_default(),
-                        address: new_device.address.clone(),
-                        snapshot_uri,
-                        onvif_client: Arc::new(client),
-                        api_camera_client: None, // TODO
-                        device_info: None,
-                        subscriptors: Vec::new(),
-                        status: CameraStatus {
-                            last_polling: None,
-                            last_error: None,
-                            last_error_notified: false,
-                            last_notification_by_chat_id: HashMap::new(),
-                            today_notifications: Vec::new(),
-                        },
-                    })
-                    .await
-                {
+                let mut camera_data = CameraData {
+                    id: 0, // new camera, insert into store
+                    name: new_device.name.clone().unwrap_or_default(),
+                    address: new_device.address.clone(),
+                    snapshot_uri,
+                    onvif_client: Arc::new(client),
+                    api_camera_client: None, // TODO
+                    device_info: None,
+                    subscriptors: Vec::new(),
+                    status: CameraStatus {
+                        last_polling: None,
+                        last_error: None,
+                        last_error_notified: false,
+                        last_notification_by_chat_id: HashMap::new(),
+                        today_notifications: Vec::new(),
+                    },
+                };
+                camera_data.device_info = camera_data.get_device_info().await;
+
+                if let Err(err) = self.add_camera(camera_data).await {
                     bail!("{}", err);
                 }
             } else if let Some(camera) = current_cameras.iter().find(|cam| {

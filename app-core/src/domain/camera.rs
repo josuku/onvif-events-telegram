@@ -53,26 +53,71 @@ pub struct CameraData {
     pub subscriptors: Vec<ChatId>,
     pub status: CameraStatus,
 }
-impl fmt::Display for CameraData {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+
+impl CameraData {
+    pub fn display_short(&self) -> String {
         let conn_data = self.onvif_client.get_connection_data();
-        write!(
-            f,
-            r#"Camera {}
+        format!(
+            r#"Camera id:{}
 - Name: {}
 - Uri: {:?}
 - Credentials: {}
-- Address: {}
-- SnapshotUri: {} 
 - Subscriptors: {}"#,
             self.id,
             self.name,
             conn_data.uri,
             !conn_data.username.is_empty() && !conn_data.password.is_empty(),
-            self.address,
-            self.snapshot_uri.clone().unwrap_or_default(),
             self.subscriptors.len(),
         )
+    }
+
+    pub async fn display_full(&self) -> String {
+        let conn_data = self.onvif_client.get_connection_data();
+
+        if let Some(device_info) = self.get_device_info().await {
+            format!(
+                r#"Camera {}
+    - Name: {}
+    - Uri: {:?}
+    - Credentials: {}
+    - Subscriptors: {}
+    - Manufacturer: {}
+    - Model: {}
+    - Firmware_version: {}
+    - Serial Number: {}
+    - Address: {}
+    - SnapshotUri: {}
+    "#,
+                self.id,
+                self.name,
+                conn_data.uri,
+                !conn_data.username.is_empty() && !conn_data.password.is_empty(),
+                self.subscriptors.len(),
+                device_info.manufacturer,
+                device_info.model,
+                device_info.firmware_version,
+                device_info.serial_number,
+                self.address,
+                self.snapshot_uri.as_deref().unwrap_or_default(),
+            )
+        } else {
+            format!(
+                r#"Camera {}
+    - Name: {}
+    - Uri: {:?}
+    - Credentials: {}
+    - Address: {}
+    - SnapshotUri: {}
+    - Subscriptors: {}"#,
+                self.id,
+                self.name,
+                conn_data.uri,
+                !conn_data.username.is_empty() && !conn_data.password.is_empty(),
+                self.address,
+                self.snapshot_uri.as_deref().unwrap_or_default(),
+                self.subscriptors.len(),
+            )
+        }
     }
 }
 
@@ -114,17 +159,17 @@ impl CameraData {
         self.onvif_client.get_connection_data().password
     }
 
-    pub async fn device_info(&mut self) -> anyhow::Result<DeviceInfo> {
+    pub async fn get_device_info(&self) -> Option<DeviceInfo> {
         if let Some(device_info) = &self.device_info {
-            return Ok(device_info.clone());
+            return Some(device_info.clone());
         }
 
         match self.onvif_client.get_device_info().await {
-            Ok(info) => {
-                self.device_info = Some(info.clone());
-                Ok(info.clone())
+            Ok(info) => Some(info),
+            Err(err) => {
+                tracing::error!("Error getting device info. {}", err);
+                None
             }
-            Err(err) => anyhow::bail!("Error getting device info. {}", err),
         }
     }
 }
