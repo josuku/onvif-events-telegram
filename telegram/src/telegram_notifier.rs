@@ -3,7 +3,7 @@ use app_core::{traits::notifier::Notifier, CameraId, ChatId, MessageId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use repository::memory_repository::MemoryRepository;
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 use teloxide::{
     payloads::{SendPhotoSetters, SendVideoSetters},
     prelude::Requester,
@@ -121,9 +121,16 @@ impl Notifier for TelegramNotifier {
         // let file = InputFile::file(video_path);
         let chat_id = teloxide::prelude::ChatId(chat_id);
 
+        let client = teloxide::net::default_reqwest_settings()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .unwrap();
+
+        let bot_to_send_video = Bot::with_client(self.client.token(), client);
+
         let result = if let Some(message_id) = message_id {
             let message_id = teloxide::types::MessageId(message_id);
-            self.client
+            bot_to_send_video
                 .send_video(chat_id, file)
                 .reply_parameters(ReplyParameters::new(message_id))
                 .await
