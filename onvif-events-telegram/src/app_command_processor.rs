@@ -51,51 +51,55 @@ impl AppCommandProcessor {
             .await;
     }
 
-    async fn get_snapshot_of_camera_id(
-        &self,
-        chat_id: ChatId,
-        camera_id: CameraId,
-    ) -> anyhow::Result<()> {
-        let camera = match self.repository.get_camera(camera_id).await {
-            Some(camera) => camera,
-            None => {
-                let error = format!("cannot find camera with id: {}", camera_id);
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
+    async fn get_snapshot_of_camera_id(&self, chat_id: ChatId, camera_id: CameraId) {
+        let repository = self.repository.clone();
+        let notifier = self.notifier.clone();
 
-        let snapshot = match camera.onvif_client.snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                let error = format!(
-                    "error getting snapshot from camera:{:?} err:{}",
-                    camera.name, err
-                );
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
+        tokio::spawn(async move {
+            let camera = match repository.get_camera(camera_id).await {
+                Some(camera) => camera,
+                None => {
+                    let error = format!("❌ cannot find camera with id: {}", camera_id);
+                    notifier
+                        .send_text_message(error.clone(), vec![chat_id])
+                        .await;
+                    tracing::error!(error);
+                    return;
+                }
+            };
 
-        _ = self
-            .notifier
-            .send_picture_message(
-                &make_caption(
-                    "Snapshot",
-                    &camera.name,
-                    &camera.id,
+            let snapshot = match camera.onvif_client.snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    let error = format!(
+                        "❌ error getting snapshot from camera:{:?} err:{}",
+                        camera.name, err
+                    );
+                    notifier
+                        .send_text_message(error.clone(), vec![chat_id])
+                        .await;
+                    tracing::error!(error);
+                    return;
+                }
+            };
+
+            _ = notifier
+                .send_picture_message(
+                    &make_caption(
+                        "Snapshot",
+                        &camera.name,
+                        &camera.id,
+                        &chrono::Utc::now(),
+                        None,
+                        &Vec::new(),
+                    ),
+                    snapshot.clone(),
+                    chat_id,
+                    camera_id,
                     &chrono::Utc::now(),
-                    None,
-                    &Vec::new(),
-                ),
-                snapshot.clone(),
-                chat_id,
-                camera_id,
-                &chrono::Utc::now(),
-            )
-            .await;
-
-        Ok(())
+                )
+                .await;
+        });
     }
 }
 
