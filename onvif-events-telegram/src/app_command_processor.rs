@@ -672,12 +672,7 @@ CURRENT CONFIG
                 rand::random::<u32>()
             );
             match api_camera_client
-                .download_recording(
-                    recordings.first().unwrap(),
-                    event_time,
-                    clip_seconds,
-                    target_name,
-                )
+                .download_recording(&recordings, event_time, clip_seconds, target_name)
                 .await
             {
                 Ok(file_path) => {

@@ -77,16 +77,14 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         client.logout().await.ok();
 
         match result {
-            Ok(files) => {
-                if let Some(file) = get_chosen_recording(&files, time) {
-                    recordings.push(Recording {
-                        name: file.file_path.clone(),
-                        size_mb: file.length_bytes as f64 / 1024.0 / 1024.0,
-                        begin: file.start_time.clone(),
-                        end: file.end_time.clone(),
-                    });
-                }
-            }
+            Ok(files) => files.iter().for_each(|file| {
+                recordings.push(Recording {
+                    name: file.file_path.clone(),
+                    size_mb: file.length_bytes as f64 / 1024.0 / 1024.0,
+                    begin: file.start_time.clone(),
+                    end: file.end_time.clone(),
+                })
+            }),
             Err(e) => anyhow::bail!("Error listing files: {}", e),
         }
 
@@ -95,12 +93,18 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
 
     async fn download_recording(
         &self,
-        recording: &Recording,
+        recordings: &[Recording],
         event_time: DateTime<Utc>,
         clip_time: Duration,
         target_name: String,
     ) -> anyhow::Result<String> {
-        let (offset_secs, duration_secs) = compute_clip_window(recording, event_time, clip_time)?;
+        // TODO remove get_chosen_recording and try to download only desired time for files
+        let recording = match get_chosen_recording(recordings, event_time) {
+            Some(recording) => recording,
+            None => bail!("No recordings found"),
+        };
+
+        let (offset_secs, duration_secs) = compute_clip_window(&recording, event_time, clip_time)?;
 
         let mut client = self.connect_and_login().await?;
         tracing::info!("download_recording -> connected to Dahua camera");
@@ -462,23 +466,23 @@ pub fn parse_dahua_time(
 }
 
 pub fn get_chosen_recording(
-    recordings: &[DahuaRecording],
+    recordings: &[Recording],
     event_time: DateTime<Utc>,
-) -> Option<DahuaRecording> {
+) -> Option<Recording> {
     let local_offset = *event_time.with_timezone(&Local).offset();
 
-    let parsed: Vec<(&DahuaRecording, DateTime<Utc>, DateTime<Utc>)> = recordings
+    let parsed: Vec<(&Recording, DateTime<Utc>, DateTime<Utc>)> = recordings
         .iter()
         .filter_map(|r| {
-            let start = parse_dahua_time(&r.start_time, local_offset).ok()?;
-            let end = parse_dahua_time(&r.end_time, local_offset).ok()?;
-            Some((r, start, end))
+            let begin = parse_dahua_time(&r.begin, local_offset).ok()?;
+            let end = parse_dahua_time(&r.end, local_offset).ok()?;
+            Some((r, begin, end))
         })
         .collect();
 
     parsed
         .iter()
-        .find(|(_, start, end)| *start <= event_time && event_time <= *end)
+        .find(|(_, begin, end)| *begin <= event_time && event_time <= *end)
         .or_else(|| {
             parsed
                 .iter()

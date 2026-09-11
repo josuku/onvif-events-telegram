@@ -11,7 +11,7 @@ pub trait ApiCameraClient: Send + Sync {
     ) -> anyhow::Result<Vec<Recording>>;
     async fn download_recording(
         &self,
-        recording: &Recording,
+        recording: &[Recording],
         time: chrono::DateTime<chrono::Utc>,
         clip_time: chrono::Duration,
         target_name: String,

@@ -2,12 +2,15 @@ use std::path::Path;
 
 use app_core::{domain::camera::Recording, traits::api_camera_client::ApiCameraClient};
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
 
 use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, get_clip_interval, run_ffmpeg};
 
 // Implementation for XMEye-icSEE compatible chinese cameras. DvrIp is the protocol they use
+
+const CAMERA_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+const CHANNEL: u8 = 0;
 
 pub struct DvrIpXmeyeApiCameraClient {
     host: String,
@@ -121,11 +124,15 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
 
     async fn download_recording(
         &self,
-        recording: &Recording,
+        recordings: &[Recording],
         event_time: DateTime<Utc>,
         clip_time: Duration,
         target_name: String,
     ) -> anyhow::Result<String> {
+        if recordings.is_empty() {
+            anyhow::bail!("no recordings to download");
+        }
+
         let (start_time, end_time) = get_clip_interval(event_time, clip_time);
 
         if (end_time - start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
@@ -134,28 +141,13 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
             );
         }
 
-        let mut cam = self.connect_and_login().await?;
-        tracing::info!("download_recording -> connected to XMEye camera");
+        let target_name_with_extension = self
+            .download_window(recordings, start_time, end_time, &target_name)
+            .await?;
 
-        let target_name_with_extension = format!("./{target_name}.h265x");
-
-        let result = cam
-            .download_file(
-                chrono::DateTime::from(start_time),
-                chrono::DateTime::from(end_time),
-                &recording.name,
-                &target_name_with_extension,
-            )
-            .await;
         tracing::info!(
             "download_recording -> file {target_name_with_extension:?} downloaded from camera"
         );
-
-        cam.close().await?;
-
-        if let Err(err) = result {
-            anyhow::bail!("Download failed: {:?}", err)
-        }
 
         let output_file = format!("./{target_name}.mp4");
         if let Err(err) = ffmpeg_convert_h265(
@@ -175,6 +167,78 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
                 .ok();
             Ok(output_file)
         }
+    }
+}
+
+impl DvrIpXmeyeApiCameraClient {
+    async fn download_window(
+        &self,
+        recordings: &[Recording],
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+        target_name: &str,
+    ) -> anyhow::Result<String> {
+        let start_local: DateTime<Local> = DateTime::from(start_time);
+        let end_local: DateTime<Local> = DateTime::from(end_time);
+        let want_begin = start_local.naive_local();
+        let want_end = end_local.naive_local();
+
+        let mut sorted_segments: Vec<(NaiveDateTime, NaiveDateTime)> = recordings
+            .iter()
+            .filter_map(|r| {
+                let seg_begin = NaiveDateTime::parse_from_str(&r.begin, CAMERA_TIME_FORMAT).ok()?;
+                let seg_end = NaiveDateTime::parse_from_str(&r.end, CAMERA_TIME_FORMAT).ok()?;
+                Some((seg_begin, seg_end))
+            })
+            .collect();
+        sorted_segments.sort_by_key(|(begin, _)| *begin);
+
+        if sorted_segments.is_empty() {
+            anyhow::bail!("all segments has not a valid date");
+        }
+
+        let mut cam = self.connect_and_login().await?;
+        let mut combined = Vec::new();
+        let mut any_downloaded = false;
+
+        for (idx, (seg_begin, seg_end)) in sorted_segments.into_iter().enumerate() {
+            let clamp_begin = seg_begin.max(want_begin);
+            let clamp_end = seg_end.min(want_end);
+            if clamp_begin >= clamp_end {
+                continue;
+            }
+
+            let clamp_begin_local = Local.from_local_datetime(&clamp_begin).unwrap();
+            let clamp_end_local = Local.from_local_datetime(&clamp_end).unwrap();
+            let part_path = std::env::temp_dir().join(format!("{target_name}_{idx}.h265part"));
+            let part_path_str = part_path.to_string_lossy().into_owned();
+
+            tracing::info!("downloading segment {clamp_begin} - {clamp_end}");
+            match cam
+                .download_file_by_time(clamp_begin_local, clamp_end_local, CHANNEL, &part_path_str)
+                .await
+            {
+                Ok(()) => {
+                    let bytes = tokio::fs::read(&part_path).await?;
+                    combined.extend_from_slice(&bytes);
+                    tokio::fs::remove_file(&part_path).await.ok();
+                    any_downloaded = true;
+                }
+                Err(e) => {
+                    tracing::warn!("cannot download segment {clamp_begin} - {clamp_end}: {e}");
+                }
+            }
+        }
+
+        cam.close().await.ok();
+
+        if !any_downloaded {
+            anyhow::bail!("cannot download any segment");
+        }
+
+        let raw_path = format!("./{target_name}.h265x");
+        tokio::fs::write(&raw_path, &combined).await?;
+        Ok(raw_path)
     }
 }
 
