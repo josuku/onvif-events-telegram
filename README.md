@@ -50,6 +50,7 @@ winget install BtbN.FFmpeg.LGPL
 Or copy ffmpeg.exe in the same directory of the bot .exe file
 
 TODOs
+- fix snapshot should replace user and password if snapshot is ok (fix also for recordings)
 - add commands getrecordingsummary, getrecordinglist and downloadrecording, giving an ISO8601 date and clip seconds
 - add manual detection (by camera or all of them batched)
 - get available onvif services

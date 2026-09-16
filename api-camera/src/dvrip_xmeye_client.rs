@@ -11,6 +11,8 @@ use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, get_clip_interval, run_ffmpeg};
 
 const CAMERA_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const CHANNEL: u8 = 0;
+const SEGMENT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+const CONNECT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
 pub struct DvrIpXmeyeApiCameraClient {
     host: String,
@@ -47,7 +49,7 @@ impl DvrIpXmeyeApiCameraClient {
 
     async fn connect_and_login(&self) -> anyhow::Result<DVRIPCam> {
         let mut cam = DVRIPCam::new(self.host.clone());
-        cam.connect(tokio::time::Duration::from_secs(10)).await?;
+        cam.connect(CONNECT_TIMEOUT).await?;
         cam.login(&self.user, &self.password).await?;
         Ok(cam)
     }
@@ -197,13 +199,19 @@ impl DvrIpXmeyeApiCameraClient {
             anyhow::bail!("all segments has not a valid date");
         }
 
-        let mut cam = self.connect_and_login().await?;
+        let last_idx = sorted_segments.len() - 1;
         let mut combined = Vec::new();
         let mut any_downloaded = false;
 
         for (idx, (seg_begin, seg_end)) in sorted_segments.into_iter().enumerate() {
             let clamp_begin = seg_begin.max(want_begin);
-            let clamp_end = seg_end.min(want_end);
+            let mut clamp_end = seg_end.min(want_end);
+
+            // remove last second to avoid xmeye firmware freezes
+            if idx != last_idx && clamp_end == seg_end {
+                clamp_end -= Duration::seconds(1);
+            }
+
             if clamp_begin >= clamp_end {
                 continue;
             }
@@ -213,24 +221,69 @@ impl DvrIpXmeyeApiCameraClient {
             let part_path = std::env::temp_dir().join(format!("{target_name}_{idx}.h265part"));
             let part_path_str = part_path.to_string_lossy().into_owned();
 
+            let mut cam = match self.connect_and_login().await {
+                Ok(cam) => cam,
+                Err(e) => {
+                    tracing::warn!(
+                        "cannot connect to download segment {clamp_begin} - {clamp_end}: {e}"
+                    );
+                    continue;
+                }
+            };
+
             tracing::info!("downloading segment {clamp_begin} - {clamp_end}");
-            match cam
-                .download_file_by_time(clamp_begin_local, clamp_end_local, CHANNEL, &part_path_str)
-                .await
-            {
-                Ok(()) => {
+            let result = tokio::time::timeout(
+                SEGMENT_TIMEOUT,
+                cam.download_file_by_time(
+                    clamp_begin_local,
+                    clamp_end_local,
+                    CHANNEL,
+                    &part_path_str,
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(())) => {
                     let bytes = tokio::fs::read(&part_path).await?;
                     combined.extend_from_slice(&bytes);
                     tokio::fs::remove_file(&part_path).await.ok();
                     any_downloaded = true;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("cannot download segment {clamp_begin} - {clamp_end}: {e}");
+                    if let Ok(bytes) = tokio::fs::read(&part_path).await
+                        && !bytes.is_empty()
+                    {
+                        tracing::info!(
+                            "using {} bytes before segment error {clamp_begin} - {clamp_end}",
+                            bytes.len()
+                        );
+                        combined.extend_from_slice(&bytes);
+                        any_downloaded = true;
+                    }
+                    tokio::fs::remove_file(&part_path).await.ok();
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "timeout ({SEGMENT_TIMEOUT:?}) downloading segment {clamp_begin} - {clamp_end}"
+                    );
+                    if let Ok(bytes) = tokio::fs::read(&part_path).await
+                        && !bytes.is_empty()
+                    {
+                        tracing::info!(
+                            "using {} bytes before segment timeout {clamp_begin} - {clamp_end}",
+                            bytes.len()
+                        );
+                        combined.extend_from_slice(&bytes);
+                        any_downloaded = true;
+                    }
+                    tokio::fs::remove_file(&part_path).await.ok();
                 }
             }
-        }
 
-        cam.close().await.ok();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), cam.close()).await;
+        }
 
         if !any_downloaded {
             anyhow::bail!("cannot download any segment");
