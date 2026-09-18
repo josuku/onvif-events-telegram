@@ -57,6 +57,11 @@ pub struct CameraData {
 impl CameraData {
     pub fn display_short(&self) -> String {
         let conn_data = self.onvif_client.get_connection_data();
+        let credentials = if !conn_data.username.is_empty() && !conn_data.password.is_empty() {
+            format!("yes ({})", conn_data.username)
+        } else {
+            "no".to_string()
+        };
         format!(
             r#"Camera id:{}
 - Name: {}
@@ -66,14 +71,18 @@ impl CameraData {
             self.id,
             self.name,
             conn_data.uri,
-            !conn_data.username.is_empty() && !conn_data.password.is_empty(),
+            credentials,
             self.subscriptors.len(),
         )
     }
 
     pub async fn display_full(&self) -> String {
         let conn_data = self.onvif_client.get_connection_data();
-
+        let credentials = if !conn_data.username.is_empty() && !conn_data.password.is_empty() {
+            format!("yes ({})", conn_data.username)
+        } else {
+            "no".to_string()
+        };
         if let Some(device_info) = self.get_device_info().await {
             format!(
                 r#"Camera {}
@@ -91,7 +100,7 @@ impl CameraData {
                 self.id,
                 self.name,
                 conn_data.uri,
-                !conn_data.username.is_empty() && !conn_data.password.is_empty(),
+                credentials,
                 self.subscriptors.len(),
                 device_info.manufacturer,
                 device_info.model,

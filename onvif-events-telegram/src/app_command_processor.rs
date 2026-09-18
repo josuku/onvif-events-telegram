@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use onvif::onvif_rs_camera_client::create_onvif_camera_client;
 use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
+use onvif::onvif_rs_service_clients::{DEFAULT_PASSWORD, DEFAULT_USERNAME};
 use repository::memory_repository::MemoryRepository;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -422,14 +423,49 @@ CURRENT CONFIG
                 .await
             {
                 Ok(fixed_uri) => {
+                    if let Err(err) = self
+                        .repository
+                        .update_snapshot_uri_from_camera(camera_id, &snapshot_uri)
+                        .await
+                    {
+                        self.send_error(&err.to_string(), chat_id).await;
+                        anyhow::bail!(err.to_string());
+                    }
+
+                    let message = format!("Camera snapshot uri fixed:{}", fixed_uri);
+                    self.send_success(&message, chat_id).await;
+
+                    let client = match create_onvif_camera_client(
+                        &camera.onvif_client.get_connection_data().uri,
+                        DEFAULT_USERNAME,
+                        DEFAULT_PASSWORD,
+                    )
+                    .await
+                    {
+                        Ok(client) => client,
+                        Err(err) => {
+                            let error = format!(
+                                "cannot connect to camera {} with new credentials: {}",
+                                camera_id, err
+                            );
+                            self.send_error(&error, chat_id).await;
+                            anyhow::bail!(error);
+                        }
+                    };
+
                     match self
                         .repository
-                        .update_snapshot_uri_from_camera(camera_id, &fixed_uri)
+                        .update_camera_credentials(
+                            camera_id,
+                            Arc::new(client),
+                            DEFAULT_USERNAME,
+                            DEFAULT_PASSWORD,
+                        )
                         .await
                     {
                         Ok(_) => {
-                            let message = format!("Camera snapshot uri fixed:{}", fixed_uri);
-                            self.send_success(&message, chat_id).await;
+                            self.send_success("Credentials updated successfully", chat_id)
+                                .await
                         }
                         Err(err) => {
                             self.send_error(&err.to_string(), chat_id).await;
