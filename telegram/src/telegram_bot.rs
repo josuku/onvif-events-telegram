@@ -49,6 +49,7 @@ pub enum BotCommand {
     ConfigDetectorEnable(bool),
     ConfigDetectorMinConfidence(f32),
     ConfigDetectorTypes(String),
+    ConfigSnapshot(String),
 }
 
 #[derive(Clone)]
@@ -329,6 +330,31 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
+        BotCommand::ConfigSnapshot(params) => {
+            let mut parts = params.split_whitespace();
+            let (camera_id, method) = match (parts.next(), parts.next()) {
+                (Some(id), Some(method)) => {
+                    let id: CameraId = match id.parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /configsnapshot camera_id api|rtsp".to_string(),
+                            ))
+                        }
+                    };
+                    (id, method)
+                }
+                _ => {
+                    return Err(string_to_response_error(
+                        "usage: /configsnapshot camera_id api|rtsp".to_string(),
+                    ))
+                }
+            };
+            command_processor
+                .set_snapshot_method_cmd(chat_id, camera_id, method)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
     };
     Ok(())
 }
@@ -490,6 +516,7 @@ fn help_text() -> String {
 /configdetectorenable `true|false` \\- enable or disable detector
 /configdetectorminconfidence `0-1` \\- set detector min confidence
 /configdetectortypes `person,cat,...` \\- set detector types
+/configsnapshot `camera_id api|rtsp` \\- camera api default, rtsp if api fails
 "
         .to_string()
 }

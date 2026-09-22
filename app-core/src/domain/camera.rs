@@ -6,6 +6,32 @@ use crate::{
 use chrono::{DateTime, Utc};
 use std::{collections::HashMap, fmt, sync::Arc};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotMethod {
+    Api,
+    Rtsp,
+}
+
+impl fmt::Display for SnapshotMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SnapshotMethod::Api => write!(f, "api"),
+            SnapshotMethod::Rtsp => write!(f, "rtsp"),
+        }
+    }
+}
+
+impl std::str::FromStr for SnapshotMethod {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "api" => Ok(SnapshotMethod::Api),
+            "rtsp" => Ok(SnapshotMethod::Rtsp),
+            other => Err(format!("unknown snapshot method: {other} (expected api|rtsp)")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Copy)]
 pub enum CameraEventType {
     Motion,
@@ -47,6 +73,8 @@ pub struct CameraData {
     pub name: String,
     pub address: String,
     pub snapshot_uri: Option<String>,
+    pub snapshot_method: SnapshotMethod,
+    pub rtsp_uri: Option<String>,
     pub device_info: Option<DeviceInfo>,
     pub onvif_client: Arc<dyn OnvifCameraClient>,
     pub api_camera_client: Option<Arc<dyn ApiCameraClient>>,
@@ -95,7 +123,9 @@ impl CameraData {
     - Firmware_version: {}
     - Serial Number: {}
     - Address: {}
+    - SnapshotMethod: {}
     - SnapshotUri: {}
+    - RtspUri: {}
     "#,
                 self.id,
                 self.name,
@@ -107,7 +137,9 @@ impl CameraData {
                 device_info.firmware_version,
                 device_info.serial_number,
                 self.address,
+                self.snapshot_method,
                 self.snapshot_uri.as_deref().unwrap_or_default(),
+                self.rtsp_uri.as_deref().unwrap_or_default(),
             )
         } else {
             format!(
@@ -116,14 +148,18 @@ impl CameraData {
     - Uri: {:?}
     - Credentials: {}
     - Address: {}
+    - SnapshotMethod: {}
     - SnapshotUri: {}
+    - RtspUri: {}
     - Subscriptors: {}"#,
                 self.id,
                 self.name,
                 conn_data.uri,
                 !conn_data.username.is_empty() && !conn_data.password.is_empty(),
                 self.address,
+                self.snapshot_method,
                 self.snapshot_uri.as_deref().unwrap_or_default(),
+                self.rtsp_uri.as_deref().unwrap_or_default(),
                 self.subscriptors.len(),
             )
         }
@@ -166,6 +202,23 @@ impl CameraData {
 
     pub fn password(&self) -> String {
         self.onvif_client.get_connection_data().password
+    }
+
+    pub async fn get_snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        match self.snapshot_method {
+            SnapshotMethod::Rtsp => self.onvif_client.snapshot_via_rtsp().await,
+            SnapshotMethod::Api => match self.onvif_client.snapshot().await {
+                Ok(bytes) => Ok(bytes),
+                Err(err) => {
+                    tracing::warn!(
+                        "snapshot via api failed for camera {} ({}), falling back to rtsp",
+                        self.id,
+                        err
+                    );
+                    self.onvif_client.snapshot_via_rtsp().await
+                }
+            },
+        }
     }
 
     pub async fn get_device_info(&self) -> Option<DeviceInfo> {

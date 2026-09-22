@@ -199,6 +199,29 @@ pub async fn get_snapshot_uris(media_client: &Client) -> Result<Vec<String>, tra
         .collect::<Vec<_>>())
 }
 
+pub async fn get_first_rtsp_uri(media_client: &Client) -> Result<String, transport::Error> {
+    let profiles = schema::media::get_profiles(media_client, &Default::default()).await?;
+    let profile = profiles
+        .profiles
+        .first()
+        .ok_or_else(|| transport::Error::Other("camera has no media profiles".to_string()))?;
+
+    let request = schema::media::GetStreamUri {
+        stream_setup: schema::onvif::StreamSetup {
+            stream: schema::onvif::StreamType::RtpUnicast,
+            transport: schema::onvif::Transport {
+                protocol: schema::onvif::TransportProtocol::Rtsp,
+                tunnel: vec![],
+            },
+        },
+        profile_token: schema::onvif::ReferenceToken(profile.token.0.clone()),
+    };
+
+    let response = schema::media::get_stream_uri(media_client, &request).await?;
+    debug!("rtsp_uri for profile {} = {}", &profile.token.0, &response.media_uri.uri);
+    Ok(response.media_uri.uri)
+}
+
 // async fn get_hostname(clients: &OnvifClients) -> Result<(), transport::Error> {
 //     let resp = schema::devicemgmt::get_hostname(&clients.devicemgmt, &Default::default()).await?;
 //     debug!("get_hostname response: {:#?}", &resp);

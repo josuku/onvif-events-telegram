@@ -19,6 +19,8 @@ pub struct DbCamera {
     pub username: String,
     pub password: String,
     pub snapshot_uri: Option<String>,
+    pub snapshot_method: String,
+    pub rtsp_uri: Option<String>,
     pub subscriptors: Vec<ChatId>,
 }
 
@@ -54,10 +56,19 @@ impl DbStore {
                 address TEXT NOT NULL UNIQUE,
                 username TEXT,
                 password TEXT,
-                snapshot_uri TEXT NULL
+                snapshot_uri TEXT NULL,
+                snapshot_method TEXT NOT NULL DEFAULT 'api',
+                rtsp_uri TEXT NULL
             );
         ";
         connection.execute(query, ()).unwrap();
+
+        // migration for tables without this columns, error if exist is not relevant
+        let _ = connection.execute(
+            "ALTER TABLE cameras ADD COLUMN snapshot_method TEXT NOT NULL DEFAULT 'api'",
+            (),
+        );
+        let _ = connection.execute("ALTER TABLE cameras ADD COLUMN rtsp_uri TEXT NULL", ());
 
         query = "
             CREATE TABLE IF NOT EXISTS camera_subscriptions (
@@ -98,7 +109,7 @@ impl DbStore {
         let connection = self.connection.lock().unwrap();
 
         let mut stmt = connection.prepare(
-            "SELECT id, name, uri, address, username, password, snapshot_uri FROM cameras",
+            "SELECT id, name, uri, address, username, password, snapshot_uri, snapshot_method, rtsp_uri FROM cameras",
         )?;
 
         let stored_cameras = stmt.query_map([], |row| {
@@ -110,6 +121,8 @@ impl DbStore {
                 username: row.get("username")?,
                 password: row.get("password")?,
                 snapshot_uri: row.get("snapshot_uri")?,
+                snapshot_method: row.get("snapshot_method").unwrap_or_else(|_| "api".to_string()),
+                rtsp_uri: row.get("rtsp_uri")?,
                 subscriptors: Vec::new(),
             })
         })?;
@@ -158,33 +171,21 @@ impl DbStore {
         address: &str,
         conn_data: &CameraConnectionData,
         snapshot_uri: &Option<String>,
+        rtsp_uri: &Option<String>,
     ) -> anyhow::Result<CameraId> {
         let connection = self.connection.lock().unwrap();
 
-        if let Some(snapshot_uri) = snapshot_uri {
-            if let Err(err) = connection.execute(
-                "INSERT INTO cameras (name, uri, address, username, password, snapshot_uri) 
-                    values (?1, ?2, ?3, ?4, ?5, ?6)",
-                [
-                    name,
-                    &conn_data.uri,
-                    address,
-                    &conn_data.username,
-                    &conn_data.password,
-                    snapshot_uri.as_str(),
-                ],
-            ) {
-                bail!("cannot insert camera: {}", err)
-            }
-        } else if let Err(err) = connection.execute(
-            "INSERT INTO cameras (name, uri, address, username, password) 
-                values (?1, ?2, ?3, ?4, ?5)",
-            [
+        if let Err(err) = connection.execute(
+            "INSERT INTO cameras (name, uri, address, username, password, snapshot_uri, rtsp_uri) \
+                values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
                 name,
                 &conn_data.uri,
                 address,
                 &conn_data.username,
                 &conn_data.password,
+                snapshot_uri.as_deref(),
+                rtsp_uri.as_deref(),
             ],
         ) {
             bail!("cannot insert camera: {}", err)
@@ -237,6 +238,28 @@ impl DbStore {
             .execute(
                 "UPDATE cameras SET snapshot_uri = ?1 WHERE id = ?2",
                 [snapshot_uri, &camera_id.to_string()],
+            )
+            .unwrap();
+    }
+
+    pub fn update_snapshot_method(&self, camera_id: CameraId, snapshot_method: &str) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "UPDATE cameras SET snapshot_method = ?1 WHERE id = ?2",
+                [snapshot_method, &camera_id.to_string()],
+            )
+            .unwrap();
+    }
+
+    pub fn update_rtsp_uri_from_camera(&self, camera_id: CameraId, rtsp_uri: &str) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "UPDATE cameras SET rtsp_uri = ?1 WHERE id = ?2",
+                [rtsp_uri, &camera_id.to_string()],
             )
             .unwrap();
     }

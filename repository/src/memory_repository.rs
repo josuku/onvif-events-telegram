@@ -2,14 +2,14 @@ use anyhow::bail;
 use app_core::{
     CameraId, ChatId,
     domain::{
-        camera::{CameraConnectionData, CameraData, CameraStatus},
+        camera::{CameraConnectionData, CameraData, CameraStatus, SnapshotMethod},
         config::BotConfig,
         discovery_device::DiscoveryDevice,
         object::ObjectClass,
     },
 };
 use chrono::{DateTime, Utc};
-use onvif::onvif_rs_camera_client::create_onvif_camera_client;
+use onvif::onvif_rs_camera_client::{create_onvif_camera_client, create_onvif_camera_client_with_rtsp_hint};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::timeout};
 use tracing::{error, info, warn};
@@ -50,9 +50,14 @@ impl MemoryRepository {
 
         for camera in cameras {
             let client = Arc::new(
-                create_onvif_camera_client(&camera.uri, &camera.username, &camera.password)
-                    .await
-                    .map_err(|err| anyhow::anyhow!({ err }))?,
+                create_onvif_camera_client_with_rtsp_hint(
+                    &camera.uri,
+                    &camera.username,
+                    &camera.password,
+                    camera.rtsp_uri.as_deref(),
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!({ err }))?,
             );
 
             let mut camera_data = CameraData {
@@ -60,6 +65,8 @@ impl MemoryRepository {
                 name: camera.name,
                 address: camera.address,
                 snapshot_uri: camera.snapshot_uri,
+                snapshot_method: camera.snapshot_method.parse().unwrap_or(SnapshotMethod::Api),
+                rtsp_uri: camera.rtsp_uri,
                 onvif_client: client,
                 api_camera_client: None,
                 device_info: None,
@@ -73,6 +80,14 @@ impl MemoryRepository {
                 },
             };
             camera_data.device_info = camera_data.get_device_info().await;
+
+            if camera_data.rtsp_uri.is_none() {
+                if let Ok(rtsp_uri) = camera_data.onvif_client.get_rtsp_uri().await {
+                    self.repo_store
+                        .update_rtsp_uri_from_camera(camera_data.id, &rtsp_uri);
+                    camera_data.rtsp_uri = Some(rtsp_uri);
+                }
+            }
 
             self.add_camera(camera_data).await?;
 
@@ -191,6 +206,7 @@ impl MemoryRepository {
                 &camera.address,
                 &camera.onvif_client.get_connection_data(),
                 &camera.snapshot_uri,
+                &camera.rtsp_uri,
             ) {
                 Ok(id) => id,
                 Err(err) => bail!("{}", err),
@@ -444,6 +460,40 @@ impl MemoryRepository {
         Ok(())
     }
 
+    pub async fn update_snapshot_method(
+        &self,
+        camera_id: CameraId,
+        snapshot_method: SnapshotMethod,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.snapshot_method = snapshot_method;
+                self.repo_store
+                    .update_snapshot_method(camera_id, &snapshot_method.to_string());
+            }
+            None => bail!("cannot find camera {}", camera_id),
+        }
+        Ok(())
+    }
+
+    pub async fn update_rtsp_uri_from_camera(
+        &self,
+        camera_id: CameraId,
+        rtsp_uri: &str,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.rtsp_uri = Some(rtsp_uri.to_string());
+                self.repo_store
+                    .update_rtsp_uri_from_camera(camera_id, rtsp_uri);
+            }
+            None => bail!("cannot find camera {}", camera_id),
+        }
+        Ok(())
+    }
+
     pub async fn update_repository_cameras(
         &self,
         new_devices: &[DiscoveryDevice],
@@ -479,11 +529,15 @@ impl MemoryRepository {
                         .map_err(|err| anyhow::anyhow!({ err }))?;
                 }
 
+                let rtsp_uri = client.get_rtsp_uri().await.ok();
+
                 let mut camera_data = CameraData {
                     id: 0, // new camera, insert into store
                     name: new_device.name.clone().unwrap_or_default(),
                     address: new_device.address.clone(),
                     snapshot_uri,
+                    snapshot_method: SnapshotMethod::Api,
+                    rtsp_uri,
                     onvif_client: Arc::new(client),
                     api_camera_client: None, // TODO
                     device_info: None,

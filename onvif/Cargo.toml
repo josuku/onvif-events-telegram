@@ -18,6 +18,7 @@ chrono = "0.4.38"
 futures-util = "0.3.30"
 url = "2.2.0"
 reqwest = "0.13.4"
+tokio = { version = "1", features = ["process", "fs", "time"] }
 tracing = "0.1"
 
 app-core = { path = "../app-core" }

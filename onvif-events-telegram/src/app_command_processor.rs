@@ -1,6 +1,6 @@
 use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
 use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
-use app_core::domain::camera::{CameraData, CameraStatus};
+use app_core::domain::camera::{CameraData, CameraStatus, SnapshotMethod};
 use app_core::domain::object::{object_classes_to_string, ObjectClass};
 use app_core::helpers::network::is_reachable;
 use app_core::traits::api_camera_client::ApiCameraClient;
@@ -69,7 +69,7 @@ impl AppCommandProcessor {
                 }
             };
 
-            let snapshot = match camera.onvif_client.snapshot().await {
+            let snapshot = match camera.get_snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
                     let error = format!(
@@ -395,6 +395,42 @@ CURRENT CONFIG
         self.get_config(chat_id).await;
     }
 
+    async fn set_snapshot_method_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        method: &str,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command SetSnapshotMethod - chat id:{} camera_id:{} method:{}",
+            chat_id, camera_id, method
+        );
+
+        let snapshot_method: SnapshotMethod = match method.parse() {
+            Ok(m) => m,
+            Err(err) => {
+                self.send_error(&err, chat_id).await;
+                anyhow::bail!(err);
+            }
+        };
+
+        match self
+            .repository
+            .update_snapshot_method(camera_id, snapshot_method)
+            .await
+        {
+            Ok(_) => {
+                self.send_success(
+                    &format!("Snapshot method set to '{}' for camera {}", snapshot_method, camera_id),
+                    chat_id,
+                )
+                .await
+            }
+            Err(err) => self.send_error(&err.to_string(), chat_id).await,
+        };
+        Ok(())
+    }
+
     async fn fix_snapshot_uri_cmd(
         &self,
         chat_id: ChatId,
@@ -545,12 +581,15 @@ CURRENT CONFIG
         };
 
         let snapshot_uri = client.get_snapshot_uri().await.ok();
+        let rtsp_uri = client.get_rtsp_uri().await.ok();
 
         let mut camera_data = CameraData {
             id: 0, // 0 -> nueva cámara, el repositorio le asigna id
             name: uri.to_string(),
             address: uri.to_string(),
             snapshot_uri,
+            snapshot_method: SnapshotMethod::Api,
+            rtsp_uri,
             onvif_client: Arc::new(client),
             api_camera_client: None,
             device_info: None,

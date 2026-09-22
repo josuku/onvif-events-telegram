@@ -9,11 +9,28 @@ use app_core::{
 };
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
-use onvif::onvif_rs_camera_client::create_onvif_camera_client;
+use onvif::onvif_rs_camera_client::create_onvif_camera_client_with_rtsp_hint;
 use repository::memory_repository::MemoryRepository;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::{Arc, LazyLock}};
 use tokio::sync::Mutex;
 use tracing::{error, info};
+
+const MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS: u32 = 3;
+const EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES: u32 = 30;
+
+static EVENT_SUBSCRIPTION_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn record_event_subscription_failure(camera_uri: &str) -> u32 {
+    let mut failures = EVENT_SUBSCRIPTION_FAILURES.lock().unwrap();
+    let count = failures.entry(camera_uri.to_string()).or_insert(0);
+    *count += 1;
+    *count
+}
+
+fn reset_event_subscription_failures(camera_uri: &str) {
+    let mut failures = EVENT_SUBSCRIPTION_FAILURES.lock().unwrap();
+    failures.remove(camera_uri);
+}
 
 pub async fn check_for_detections_in_cameras(
     repository: Arc<MemoryRepository>,
@@ -63,13 +80,41 @@ async fn check_camera(
         camera.onvif_client.get_connection_data().uri
     );
     let onvif_event = match camera.onvif_client.get_event_message().await {
-        Ok(Some(event)) => event,
+        Ok(Some(event)) => {
+            reset_event_subscription_failures(&camera.onvif_client.get_connection_data().uri);
+            event
+        }
         Ok(None) => {
+            reset_event_subscription_failures(&camera.onvif_client.get_connection_data().uri);
             clean_sync_error_and_notify(&camera, &repository, &event_bus).await;
             return;
         }
         Err(err) => {
-            error!("error getting pull message. error:{}", err);
+            let conn_uri = camera.onvif_client.get_connection_data().uri;
+            let failures = record_event_subscription_failure(&conn_uri);
+
+            let past_threshold = failures > MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS;
+            let is_backoff_retry_cycle = past_threshold
+                && (failures - MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS)
+                    % EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES
+                    == 0;
+
+            if past_threshold && !is_backoff_retry_cycle {
+                return;
+            }
+
+            if failures == MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS + 1 {
+                error!(
+                    "error getting pull message for camera {} has failed {} times in a row; \
+                    backing off to a reconnect attempt every {} cycles instead of every cycle. error:{}",
+                    conn_uri,
+                    failures - 1,
+                    EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES,
+                    err
+                );
+            } else {
+                error!("error getting pull message. error:{}", err);
+            }
             camera.onvif_client.unsubscribe().await;
 
             // updated camera, error can appear after many seconds
@@ -82,10 +127,11 @@ async fn check_camera(
             };
 
             let conn_data = camera.onvif_client.get_connection_data();
-            match create_onvif_camera_client(
+            match create_onvif_camera_client_with_rtsp_hint(
                 &conn_data.uri,
                 &conn_data.username,
                 &conn_data.password,
+                camera.rtsp_uri.as_deref(),
             )
             .await
             {
@@ -108,7 +154,7 @@ async fn check_camera(
 
     clean_sync_error_and_notify(&camera, &repository, &event_bus).await;
 
-    let snapshot = match camera.onvif_client.snapshot().await {
+    let snapshot = match camera.get_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             error!(

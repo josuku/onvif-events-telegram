@@ -2555,6 +2555,7 @@ dependencies = [
  "onvif-xsd",
  "reqwest 0.13.4",
  "schema",
+ "tokio",
  "tracing",
  "url",
  "xsd-types",

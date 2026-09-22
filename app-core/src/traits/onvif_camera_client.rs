@@ -5,7 +5,9 @@ use crate::domain::camera::{CameraConnectionData, DeviceInfo, OnvifCameraEvent};
 #[async_trait]
 pub trait OnvifCameraClient: Send + Sync {
     async fn get_snapshot_uri(&self) -> anyhow::Result<String>;
+    async fn get_rtsp_uri(&self) -> anyhow::Result<String>;
     async fn snapshot(&self) -> anyhow::Result<Vec<u8>>;
+    async fn snapshot_via_rtsp(&self) -> anyhow::Result<Vec<u8>>;
     async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>>;
     fn connected(&self) -> bool;
     fn get_connection_data(&self) -> CameraConnectionData;

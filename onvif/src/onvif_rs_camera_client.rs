@@ -1,4 +1,4 @@
-use super::onvif_rs_service_clients::{get_snapshot_uris, OnvifRsServiceClients};
+use super::onvif_rs_service_clients::{get_first_rtsp_uri, get_snapshot_uris, OnvifRsServiceClients};
 use crate::onvif_rs_service_clients::{
     create_default_user, get_users, DEFAULT_PASSWORD, DEFAULT_USERNAME,
 };
@@ -17,7 +17,7 @@ use schema::{
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
     transport::Transport,
 };
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::{Arc, LazyLock}};
 use tracing::error;
 use url::Url;
 
@@ -29,8 +29,30 @@ pub struct OnvifRsCameraClient {
     event_subscription: Option<SoapClient>,
     snapshot_uri: Option<String>,
     snapshot_requires_auth: bool,
+    rtsp_uri: Option<String>,
     http_client: reqwest::Client,
     digest_session: Option<Arc<Mutex<DigestAuthSession>>>,
+}
+
+const MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS: u32 = 3;
+
+static SNAPSHOT_URI_RECOVERY_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
+   LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn snapshot_uri_recovery_exhausted(camera_uri: &str) -> bool {
+    let failures = SNAPSHOT_URI_RECOVERY_FAILURES.lock().unwrap();
+    failures.get(camera_uri).copied().unwrap_or(0) >= MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS
+}
+
+fn record_snapshot_uri_recovery_failure(camera_uri: &str) -> u32 {
+    let mut failures = SNAPSHOT_URI_RECOVERY_FAILURES.lock().unwrap();
+    let count = failures.entry(camera_uri.to_string()).or_insert(0);
+    *count += 1;
+    *count
+}
+
+fn is_xmeye_manufacturer(manufacturer: &str) -> bool {
+    manufacturer.eq_ignore_ascii_case("H264")
 }
 
 impl OnvifRsCameraClient {
@@ -47,7 +69,11 @@ impl OnvifRsCameraClient {
             clients: create_onvif_clients(&conn_data).await,
             snapshot_uri: None,
             snapshot_requires_auth: false,
-            http_client: reqwest::Client::new(),
+            rtsp_uri: None,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             digest_session: None,
         })
     }
@@ -93,6 +119,39 @@ impl OnvifRsCameraClient {
                 );
             }
         }
+
+        if self.rtsp_uri.is_none() {
+            match self.resolve_rtsp_uri().await {
+                Ok(uri) => self.rtsp_uri = Some(uri),
+                Err(err) => {
+                    error!(
+                        "cannot get rtsp uri for camera:{}. err:{}",
+                        self.conn_data.uri, err
+                    );
+                }
+            }
+        }
+    }
+
+    async fn resolve_rtsp_uri(&self) -> anyhow::Result<String> {
+        let clients = self
+            .clients
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no clients initialized for camera: {}", self.conn_data.uri))?;
+        let media = clients.media.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("media client not initialized for camera: {}", self.conn_data.uri)
+        })?;
+
+        let raw_uri = get_first_rtsp_uri(media)
+            .await
+            .map_err(|err| anyhow::anyhow!("cannot get rtsp uri: {}", err))?;
+
+        let mut url = Url::parse(&raw_uri)?;
+        url.set_username(&self.conn_data.username)
+            .map_err(|_| anyhow::anyhow!("cannot set rtsp username in uri"))?;
+        url.set_password(Some(&self.conn_data.password))
+            .map_err(|_| anyhow::anyhow!("cannot set rtsp password in uri"))?;
+        Ok(url.to_string())
     }
 
     async fn resolve_snapshot_uri(&self) -> anyhow::Result<(String, bool)> {
@@ -119,6 +178,13 @@ impl OnvifRsCameraClient {
                                     .is_ok()
                                     {
                                         return Ok((snapshot_uri, true));
+                                    }
+                                    if snapshot_uri_recovery_exhausted(&self.conn_data.uri) {
+                                        error!(
+                                            "cannot download picture from uri (failed {} times for camera:{}) trying rtsp fallback",
+                                            MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS, self.conn_data.uri
+                                        );
+                                        continue;
                                     }
                                     error!("cannot download picture from uri. trying to create new onvif user.");
                                     match self
@@ -148,8 +214,12 @@ impl OnvifRsCameraClient {
                                             {
                                                 return Ok((fixed_url, true));
                                             }
+                                            record_snapshot_uri_recovery_failure(&self.conn_data.uri);
                                         }
-                                        Err(err) => bail!("{}", err),
+                                        Err(err) => {
+                                            record_snapshot_uri_recovery_failure(&self.conn_data.uri);
+                                            bail!("{}", err);
+                                        }
                                     }
                                 }
                             }
@@ -193,6 +263,21 @@ impl OnvifCameraClient for OnvifRsCameraClient {
 
     async fn get_snapshot_uri(&self) -> anyhow::Result<String> {
         self.resolve_snapshot_uri().await.map(|(uri, _)| uri)
+    }
+
+    async fn get_rtsp_uri(&self) -> anyhow::Result<String> {
+        if let Some(uri) = &self.rtsp_uri {
+            return Ok(uri.clone());
+        }
+        self.resolve_rtsp_uri().await
+    }
+
+    async fn snapshot_via_rtsp(&self) -> anyhow::Result<Vec<u8>> {
+        let uri = self.get_rtsp_uri().await?;
+        let t0 = std::time::Instant::now();
+        let result = capture_snapshot_via_rtsp(&uri).await;
+        tracing::debug!("rtsp snapshot from {} took {}ms", self.conn_data.uri, t0.elapsed().as_millis());
+        result
     }
 
     async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>> {
@@ -244,22 +329,31 @@ impl OnvifCameraClient for OnvifRsCameraClient {
         camera_uri: &str,
         orig_snapshot_uri: &str,
     ) -> anyhow::Result<String> {
-        match get_users(camera_uri).await {
-            Ok(users) => {
-                if !users.contains(&DEFAULT_USERNAME.to_string()) {
-                    if let Err(err) = create_default_user(camera_uri).await {
-                        anyhow::bail!("cannot create user {}. error:{}", DEFAULT_USERNAME, err);
+        let device_info = match self.get_device_info().await {
+            Ok(info) => info,
+            Err(err) => bail!("cannot get device info. {err}"),
+        };
+
+        if is_xmeye_manufacturer(&device_info.manufacturer) {
+            match get_users(camera_uri).await {
+                Ok(users) => {
+                    if !users.contains(&DEFAULT_USERNAME.to_string()) {
+                        if let Err(err) = create_default_user(camera_uri).await {
+                            anyhow::bail!("cannot create user {}. error:{}", DEFAULT_USERNAME, err);
+                        }
                     }
+                    Ok(replace_snapshot_uri_credentials(
+                        orig_snapshot_uri,
+                        DEFAULT_USERNAME,
+                        DEFAULT_PASSWORD,
+                    ))
                 }
-                Ok(replace_snapshot_uri_credentials(
-                    orig_snapshot_uri,
-                    DEFAULT_USERNAME,
-                    DEFAULT_PASSWORD,
-                ))
+                Err(_) => {
+                    anyhow::bail!("cannot get users of camera:{}", camera_uri)
+                }
             }
-            Err(_) => {
-                anyhow::bail!("cannot get users of camera:{}", camera_uri)
-            }
+        } else {
+            anyhow::bail!("cannot fix connection for camera:{} of manufacturer: {}", camera_uri, device_info.manufacturer);
         }
     }
 
@@ -328,6 +422,15 @@ pub async fn create_onvif_camera_client(
     username: &str,
     password: &str,
 ) -> anyhow::Result<OnvifRsCameraClient> {
+    create_onvif_camera_client_with_rtsp_hint(uri, username, password, None).await
+}
+
+pub async fn create_onvif_camera_client_with_rtsp_hint(
+    uri: &str,
+    username: &str,
+    password: &str,
+    known_rtsp_uri: Option<&str>,
+) -> anyhow::Result<OnvifRsCameraClient> {
     let mut client = match OnvifRsCameraClient::new(uri, username, password).await {
         Ok(cli) => cli,
         Err(err) => {
@@ -339,6 +442,9 @@ pub async fn create_onvif_camera_client(
             );
         }
     };
+    if let Some(rtsp_uri) = known_rtsp_uri {
+        client.rtsp_uri = Some(rtsp_uri.to_string());
+    }
     client.init().await;
     Ok(client)
 }
@@ -408,7 +514,7 @@ async fn create_event_pull_message_client(
             username: conn_data.username.clone(),
             password: conn_data.password.clone(),
         }))
-        .auth_type(AuthType::Digest)
+        .auth_type(AuthType::UsernameToken) // TODO JARR before it was Digest. does this break nay camera?
         .build())
 }
 
@@ -444,6 +550,63 @@ fn parse_event_type(msg: &PullMessagesResponse) -> Option<CameraEventType> {
     }
 
     None
+}
+
+async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "oet_snapshot_{}_{}.jpg",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+    ));
+
+    let mut child = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            rtsp_uri,
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+            "-q:v",
+            "2",
+        ])
+        .arg(&tmp_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("cannot execute ffmpeg (¿está instalado y en el PATH?): {}", e))?;
+
+    let mut stderr = child.stderr.take();
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait()).await
+    {
+        Ok(status) => status.map_err(|e| anyhow::anyhow!("ffmpeg wait failed: {}", e))?,
+        Err(_) => {
+            let _ = child.start_kill();
+            bail!("ffmpeg timed out capturing snapshot via rtsp (¿stream inaccesible?): {rtsp_uri}");
+        }
+    };
+
+    if !status.success() {
+        let mut err_buf = String::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_string(&mut err_buf).await;
+        }
+        bail!("ffmpeg failed capturing snapshot via rtsp: {err_buf}");
+    }
+
+    let bytes = tokio::fs::read(&tmp_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot read ffmpeg output file: {}", e))?;
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+    Ok(bytes)
 }
 
 async fn download_picture_from_uri(client: &reqwest::Client, uri: &str) -> anyhow::Result<Vec<u8>> {
