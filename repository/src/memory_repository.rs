@@ -9,7 +9,9 @@ use app_core::{
     },
 };
 use chrono::{DateTime, Utc};
-use onvif::onvif_rs_camera_client::{create_onvif_camera_client, create_onvif_camera_client_with_rtsp_hint};
+use onvif::onvif_rs_camera_client::{
+    create_onvif_camera_client, create_onvif_camera_client_with_rtsp_hint,
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::timeout};
 use tracing::{error, info, warn};
@@ -65,8 +67,12 @@ impl MemoryRepository {
                 name: camera.name,
                 address: camera.address,
                 snapshot_uri: camera.snapshot_uri,
-                snapshot_method: camera.snapshot_method.parse().unwrap_or(SnapshotMethod::Api),
+                snapshot_method: camera
+                    .snapshot_method
+                    .parse()
+                    .unwrap_or(SnapshotMethod::Api),
                 rtsp_uri: camera.rtsp_uri,
+                multi_channel_detection: camera.multi_channel_detection,
                 onvif_client: client,
                 api_camera_client: None,
                 device_info: None,
@@ -477,6 +483,29 @@ impl MemoryRepository {
         Ok(())
     }
 
+    pub async fn update_multi_channel_detection(
+        &self,
+        camera_id: CameraId,
+        enable: bool,
+    ) -> anyhow::Result<()> {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                if enable && camera.snapshot_method != SnapshotMethod::Rtsp {
+                    bail!(
+                        "camera {} snapshot_method should be 'rtsp' to use this",
+                        camera_id
+                    );
+                }
+                camera.multi_channel_detection = enable;
+                self.repo_store
+                    .update_multi_channel_detection(camera_id, enable);
+            }
+            None => bail!("cannot find camera {}", camera_id),
+        }
+        Ok(())
+    }
+
     pub async fn update_rtsp_uri_from_camera(
         &self,
         camera_id: CameraId,
@@ -538,8 +567,9 @@ impl MemoryRepository {
                     snapshot_uri,
                     snapshot_method: SnapshotMethod::Api,
                     rtsp_uri,
+                    multi_channel_detection: false,
                     onvif_client: Arc::new(client),
-                    api_camera_client: None, // TODO
+                    api_camera_client: None,
                     device_info: None,
                     subscriptors: Vec::new(),
                     status: CameraStatus {

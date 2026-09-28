@@ -54,6 +54,12 @@ pub trait CommandProcessor: Send + Sync {
         camera_id: CameraId,
         method: &str,
     ) -> anyhow::Result<()>;
+    async fn set_multi_channel_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        enable: bool,
+    ) -> anyhow::Result<()>;
     async fn enable_daily_report_cmd(&self, chat_id: ChatId, enable: bool) -> anyhow::Result<()>;
     async fn add_camera_cmd(
         &self,

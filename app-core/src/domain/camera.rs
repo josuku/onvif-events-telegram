@@ -27,7 +27,9 @@ impl std::str::FromStr for SnapshotMethod {
         match s.to_lowercase().as_str() {
             "api" => Ok(SnapshotMethod::Api),
             "rtsp" => Ok(SnapshotMethod::Rtsp),
-            other => Err(format!("unknown snapshot method: {other} (expected api|rtsp)")),
+            other => Err(format!(
+                "unknown snapshot method: {other} (expected api|rtsp)"
+            )),
         }
     }
 }
@@ -58,6 +60,7 @@ pub struct CameraEvent {
     pub camera: CameraData,
     pub snapshot: Vec<u8>, // TODO try with Arc<Vec<u8>> less memory
     pub objects: Vec<Object>,
+    pub bypass_notification_throttle: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -75,6 +78,7 @@ pub struct CameraData {
     pub snapshot_uri: Option<String>,
     pub snapshot_method: SnapshotMethod,
     pub rtsp_uri: Option<String>,
+    pub multi_channel_detection: bool, // only works with rtsp snapshot
     pub device_info: Option<DeviceInfo>,
     pub onvif_client: Arc<dyn OnvifCameraClient>,
     pub api_camera_client: Option<Arc<dyn ApiCameraClient>>,
@@ -95,11 +99,13 @@ impl CameraData {
 - Name: {}
 - Uri: {:?}
 - Credentials: {}
+- Multi-channel detection: {}
 - Subscriptors: {}"#,
             self.id,
             self.name,
             conn_data.uri,
             credentials,
+            self.multi_channel_detection,
             self.subscriptors.len(),
         )
     }
@@ -126,6 +132,7 @@ impl CameraData {
     - SnapshotMethod: {}
     - SnapshotUri: {}
     - RtspUri: {}
+    - Multi-channel detection: {}
     "#,
                 self.id,
                 self.name,
@@ -140,6 +147,7 @@ impl CameraData {
                 self.snapshot_method,
                 self.snapshot_uri.as_deref().unwrap_or_default(),
                 self.rtsp_uri.as_deref().unwrap_or_default(),
+                self.multi_channel_detection,
             )
         } else {
             format!(
@@ -151,6 +159,7 @@ impl CameraData {
     - SnapshotMethod: {}
     - SnapshotUri: {}
     - RtspUri: {}
+    - Multi-channel detection: {}
     - Subscriptors: {}"#,
                 self.id,
                 self.name,
@@ -160,6 +169,7 @@ impl CameraData {
                 self.snapshot_method,
                 self.snapshot_uri.as_deref().unwrap_or_default(),
                 self.rtsp_uri.as_deref().unwrap_or_default(),
+                self.multi_channel_detection,
                 self.subscriptors.len(),
             )
         }
@@ -219,6 +229,39 @@ impl CameraData {
                 }
             },
         }
+    }
+
+    // Captures a snapshot from every rtsp channel the camera exposes sequentially
+    pub async fn get_snapshots_all_channels(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let channels = self.onvif_client.get_rtsp_channels().await?;
+        let multi_channel = channels.len() > 1;
+
+        let mut snapshots = Vec::new();
+        for (label, uri) in channels {
+            match self.onvif_client.snapshot_via_rtsp_uri(&uri).await {
+                Ok(bytes) => snapshots.push((label, bytes)),
+                Err(err) => tracing::warn!(
+                    "cannot capture snapshot for channel '{}' of camera {} ({}): {}",
+                    label,
+                    self.id,
+                    self.name,
+                    err
+                ),
+            }
+            if multi_channel {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        }
+
+        if snapshots.is_empty() {
+            anyhow::bail!(
+                "cannot capture any channel snapshot for camera {} ({})",
+                self.id,
+                self.name
+            );
+        }
+
+        Ok(snapshots)
     }
 
     pub async fn get_device_info(&self) -> Option<DeviceInfo> {

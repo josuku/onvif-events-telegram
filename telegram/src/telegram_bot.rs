@@ -50,6 +50,7 @@ pub enum BotCommand {
     ConfigDetectorMinConfidence(f32),
     ConfigDetectorTypes(String),
     ConfigSnapshot(String),
+    ConfigMultiChannel(String),
 }
 
 #[derive(Clone)]
@@ -121,22 +122,37 @@ impl TelegramBot {
             while let Ok(event) = rx.recv().await {
                 match event {
                     app_core::domain::event_bus::EventBusMessage::CameraEvent(camera_event) => {
-                        notifier
-                            .send_text_with_picture_message(
-                                make_caption(
-                                    "New Detection",
-                                    &camera_event.camera.name,
-                                    &camera_event.camera.id,
+                        let caption = make_caption(
+                            "New Detection",
+                            &camera_event.camera.name,
+                            &camera_event.camera.id,
+                            &camera_event.timestamp,
+                            Some(camera_event.r#type),
+                            &camera_event.objects,
+                        );
+                        if camera_event.bypass_notification_throttle {
+                            for chat_id in camera_event.camera.subscriptors.clone() {
+                                let _ = notifier
+                                    .send_picture_message(
+                                        &caption,
+                                        camera_event.snapshot.clone(),
+                                        chat_id,
+                                        camera_event.camera.id,
+                                        &camera_event.timestamp,
+                                    )
+                                    .await;
+                            }
+                        } else {
+                            notifier
+                                .send_text_with_picture_message(
+                                    caption,
+                                    camera_event.snapshot.clone(),
+                                    camera_event.camera.subscriptors.clone(),
+                                    camera_event.camera.id,
                                     &camera_event.timestamp,
-                                    Some(camera_event.r#type),
-                                    &camera_event.objects,
-                                ),
-                                camera_event.snapshot.clone(),
-                                camera_event.camera.subscriptors.clone(),
-                                camera_event.camera.id,
-                                &camera_event.timestamp,
-                            )
-                            .await;
+                                )
+                                .await;
+                        }
                     }
                     app_core::domain::event_bus::EventBusMessage::Error(error_message) => {
                         let title = if error_message.recovered {
@@ -355,6 +371,39 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
+        BotCommand::ConfigMultiChannel(params) => {
+            let mut parts = params.split_whitespace();
+            let (camera_id, enable) = match (parts.next(), parts.next()) {
+                (Some(id), Some(enable)) => {
+                    let id: CameraId = match id.parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /configmultichannel camera_id true|false".to_string(),
+                            ))
+                        }
+                    };
+                    let enable: bool = match enable.parse() {
+                        Ok(enable) => enable,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /configmultichannel camera_id true|false".to_string(),
+                            ))
+                        }
+                    };
+                    (id, enable)
+                }
+                _ => {
+                    return Err(string_to_response_error(
+                        "usage: /configmultichannel camera_id true|false".to_string(),
+                    ))
+                }
+            };
+            command_processor
+                .set_multi_channel_detection_cmd(chat_id, camera_id, enable)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
     };
     Ok(())
 }
@@ -516,6 +565,7 @@ fn help_text() -> String {
 /configdetectorenable `true|false` \\- enable or disable detector
 /configdetectorminconfidence `0-1` \\- set detector min confidence
 /configdetectortypes `person,cat,...` \\- set detector types
+/configmultichannel `camera_id true|false` \\- detect on every extra rtsp channel of this camera
 /configsnapshot `camera_id api|rtsp` \\- camera api default, rtsp if api fails
 "
         .to_string()

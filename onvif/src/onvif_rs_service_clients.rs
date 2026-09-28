@@ -1,5 +1,6 @@
 extern crate onvif;
 
+use app_core::traits::onvif_camera_client::{ChannelLabel, RtspUri};
 use chrono::{NaiveDate, Utc};
 use onvif::soap::client::Client;
 use onvif::soap::{self, client::AuthType};
@@ -218,8 +219,57 @@ pub async fn get_first_rtsp_uri(media_client: &Client) -> Result<String, transpo
     };
 
     let response = schema::media::get_stream_uri(media_client, &request).await?;
-    debug!("rtsp_uri for profile {} = {}", &profile.token.0, &response.media_uri.uri);
+    debug!(
+        "rtsp_uri for profile {} = {}",
+        &profile.token.0, &response.media_uri.uri
+    );
     Ok(response.media_uri.uri)
+}
+
+pub async fn get_all_rtsp_uris(
+    media_client: &Client,
+) -> Result<Vec<(ChannelLabel, RtspUri)>, transport::Error> {
+    let profiles = schema::media::get_profiles(media_client, &Default::default()).await?;
+    if profiles.profiles.is_empty() {
+        return Err(transport::Error::Other(
+            "camera has no media profiles".to_string(),
+        ));
+    }
+
+    let requests: Vec<_> = profiles
+        .profiles
+        .iter()
+        .map(|p: &schema::onvif::Profile| schema::media::GetStreamUri {
+            stream_setup: schema::onvif::StreamSetup {
+                stream: schema::onvif::StreamType::RtpUnicast,
+                transport: schema::onvif::Transport {
+                    protocol: schema::onvif::TransportProtocol::Rtsp,
+                    tunnel: vec![],
+                },
+            },
+            profile_token: schema::onvif::ReferenceToken(p.token.0.clone()),
+        })
+        .collect();
+
+    let responses = futures_util::future::try_join_all(
+        requests
+            .iter()
+            .map(|r| schema::media::get_stream_uri(media_client, r)),
+    )
+    .await?;
+
+    let mut channels = Vec::new();
+    for (p, resp) in profiles.profiles.iter().zip(responses.iter()) {
+        let label = if !p.name.0.is_empty() {
+            p.name.0.clone()
+        } else {
+            p.token.0.clone()
+        };
+        debug!("rtsp_uri for channel {} = {}", &label, &resp.media_uri.uri);
+        channels.push((label, resp.media_uri.uri.clone()));
+    }
+
+    Ok(channels)
 }
 
 // async fn get_hostname(clients: &OnvifClients) -> Result<(), transport::Error> {

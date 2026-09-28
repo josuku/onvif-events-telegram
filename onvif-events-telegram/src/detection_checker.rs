@@ -1,6 +1,7 @@
 use app_core::{
     domain::{
-        camera::{CameraData, CameraEvent},
+        camera::{CameraData, CameraEvent, OnvifCameraEvent},
+        config::BotConfig,
         error_message::ErrorMessage,
         event_bus::{EventBus, EventBusMessage},
     },
@@ -11,14 +12,18 @@ use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use onvif::onvif_rs_camera_client::create_onvif_camera_client_with_rtsp_hint;
 use repository::memory_repository::MemoryRepository;
-use std::{collections::HashMap, sync::{Arc, LazyLock}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
 const MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS: u32 = 3;
 const EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES: u32 = 30;
 
-static EVENT_SUBSCRIPTION_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static EVENT_SUBSCRIPTION_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn record_event_subscription_failure(camera_uri: &str) -> u32 {
     let mut failures = EVENT_SUBSCRIPTION_FAILURES.lock().unwrap();
@@ -183,13 +188,40 @@ async fn check_camera(
         Vec::new()
     };
 
+    let mut should_notify = false;
+    for chat_id in camera.subscriptors.clone() {
+        let last_notification_time = repository
+            .get_last_notification_time(camera.id, chat_id)
+            .await;
+
+        if last_notification_time.is_none()
+            || chrono::Utc::now().timestamp() - last_notification_time.unwrap().timestamp()
+                > config.between_seconds.try_into().unwrap()
+        {
+            should_notify = true;
+            break;
+        }
+    }
+
     event_bus.publish(EventBusMessage::CameraEvent(CameraEvent {
         r#type: onvif_event.r#type,
         timestamp: onvif_event.timestamp,
         camera: camera.clone(),
         snapshot,
         objects: objects.clone(),
+        bypass_notification_throttle: false,
     }));
+
+    if config.detector.enable && camera.multi_channel_detection && should_notify {
+        check_extra_channels_for_detections(
+            &camera,
+            &event_bus,
+            &object_detector,
+            &onvif_event,
+            &config,
+        )
+        .await;
+    }
 
     // TODO DO IN REPOSITORY
     repository
@@ -203,6 +235,70 @@ async fn check_camera(
         onvif_event.r#type,
         objects.iter().map(|o| format!("{o}")).join(", ")
     );
+}
+
+async fn check_extra_channels_for_detections(
+    camera: &CameraData,
+    event_bus: &Arc<EventBus>,
+    object_detector: &Arc<Mutex<dyn ObjectDetector>>,
+    onvif_event: &OnvifCameraEvent,
+    config: &BotConfig,
+) {
+    let channel_snapshots = match camera.get_snapshots_all_channels().await {
+        Ok(snapshots) if snapshots.len() > 1 => snapshots,
+        Ok(_) => return,
+        Err(err) => {
+            error!(
+                "error capturing multi-channel snapshots for camera:{}. error:{}",
+                camera.name, err
+            );
+            return;
+        }
+    };
+
+    for (label, channel_snapshot) in channel_snapshots {
+        let objects = {
+            let mut object_detector = object_detector.lock().await;
+            match object_detector.detect(
+                &channel_snapshot,
+                config.detector.min_confidence,
+                &config.detector.types,
+            ) {
+                Ok(objects) => objects,
+                Err(err) => {
+                    error!(
+                        "error detecting objects in channel '{}' of camera:{}. error:{}",
+                        label, camera.name, err
+                    );
+                    continue;
+                }
+            }
+        };
+
+        if objects.is_empty() {
+            continue;
+        }
+
+        info!(
+            "{} - additional detection in camera:{} channel:{} objects:{}",
+            onvif_event.timestamp,
+            camera.name,
+            label,
+            objects.iter().map(|o| format!("{o}")).join(", ")
+        );
+
+        let mut channel_camera = camera.clone();
+        channel_camera.name = format!("{} [{}]", camera.name, label);
+
+        event_bus.publish(EventBusMessage::CameraEvent(CameraEvent {
+            r#type: onvif_event.r#type,
+            timestamp: onvif_event.timestamp,
+            camera: channel_camera,
+            snapshot: channel_snapshot,
+            objects,
+            bypass_notification_throttle: true,
+        }));
+    }
 }
 
 async fn set_sync_error_and_notify(

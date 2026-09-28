@@ -1,4 +1,6 @@
-use super::onvif_rs_service_clients::{get_first_rtsp_uri, get_snapshot_uris, OnvifRsServiceClients};
+use super::onvif_rs_service_clients::{
+    get_all_rtsp_uris, get_first_rtsp_uri, get_snapshot_uris, OnvifRsServiceClients,
+};
 use crate::onvif_rs_service_clients::{
     create_default_user, get_users, DEFAULT_PASSWORD, DEFAULT_USERNAME,
 };
@@ -17,7 +19,11 @@ use schema::{
     event::{self, CreatePullPointSubscription, PullMessages, PullMessagesResponse},
     transport::Transport,
 };
-use std::{collections::HashMap, str::FromStr, sync::{Arc, LazyLock}};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, LazyLock},
+};
 use tracing::error;
 use url::Url;
 
@@ -30,6 +36,7 @@ pub struct OnvifRsCameraClient {
     snapshot_uri: Option<String>,
     snapshot_requires_auth: bool,
     rtsp_uri: Option<String>,
+    rtsp_channels: Option<Vec<(String, String)>>,
     http_client: reqwest::Client,
     digest_session: Option<Arc<Mutex<DigestAuthSession>>>,
 }
@@ -37,7 +44,7 @@ pub struct OnvifRsCameraClient {
 const MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS: u32 = 3;
 
 static SNAPSHOT_URI_RECOVERY_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
-   LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn snapshot_uri_recovery_exhausted(camera_uri: &str) -> bool {
     let failures = SNAPSHOT_URI_RECOVERY_FAILURES.lock().unwrap();
@@ -70,6 +77,7 @@ impl OnvifRsCameraClient {
             snapshot_uri: None,
             snapshot_requires_auth: false,
             rtsp_uri: None,
+            rtsp_channels: None,
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
@@ -131,22 +139,65 @@ impl OnvifRsCameraClient {
                 }
             }
         }
+
+        if self.rtsp_channels.is_none() {
+            match self.resolve_rtsp_channels().await {
+                Ok(channels) => {
+                    tracing::debug!(
+                        "resolved {} rtsp channel(s) for camera:{}",
+                        channels.len(),
+                        self.conn_data.uri
+                    );
+                    self.rtsp_channels = Some(channels);
+                }
+                Err(err) => {
+                    error!(
+                        "cannot get rtsp channels for camera:{}. err:{}",
+                        self.conn_data.uri, err
+                    );
+                }
+            }
+        }
     }
 
     async fn resolve_rtsp_uri(&self) -> anyhow::Result<String> {
-        let clients = self
-            .clients
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no clients initialized for camera: {}", self.conn_data.uri))?;
+        let clients = self.clients.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no clients initialized for camera: {}", self.conn_data.uri)
+        })?;
         let media = clients.media.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("media client not initialized for camera: {}", self.conn_data.uri)
+            anyhow::anyhow!(
+                "media client not initialized for camera: {}",
+                self.conn_data.uri
+            )
         })?;
 
-        let raw_uri = get_first_rtsp_uri(media)
+        get_first_rtsp_uri(media)
             .await
-            .map_err(|err| anyhow::anyhow!("cannot get rtsp uri: {}", err))?;
+            .map(|raw_uri| strip_credentials(&raw_uri))
+            .map_err(|err| anyhow::anyhow!("cannot get rtsp uri: {}", err))
+    }
 
-        let mut url = Url::parse(&raw_uri)?;
+    async fn resolve_rtsp_channels(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let clients = self.clients.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no clients initialized for camera: {}", self.conn_data.uri)
+        })?;
+        let media = clients.media.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "media client not initialized for camera: {}",
+                self.conn_data.uri
+            )
+        })?;
+
+        Ok(get_all_rtsp_uris(media)
+            .await
+            .map_err(|err| anyhow::anyhow!("cannot get rtsp channels: {}", err))?
+            .into_iter()
+            .map(|(label, raw_uri)| (label, strip_credentials(&raw_uri)))
+            .collect())
+    }
+
+    fn with_credentials(&self, raw_uri: &str) -> anyhow::Result<String> {
+        let mut url = Url::parse(raw_uri)?;
         url.set_username(&self.conn_data.username)
             .map_err(|_| anyhow::anyhow!("cannot set rtsp username in uri"))?;
         url.set_password(Some(&self.conn_data.password))
@@ -214,10 +265,14 @@ impl OnvifRsCameraClient {
                                             {
                                                 return Ok((fixed_url, true));
                                             }
-                                            record_snapshot_uri_recovery_failure(&self.conn_data.uri);
+                                            record_snapshot_uri_recovery_failure(
+                                                &self.conn_data.uri,
+                                            );
                                         }
                                         Err(err) => {
-                                            record_snapshot_uri_recovery_failure(&self.conn_data.uri);
+                                            record_snapshot_uri_recovery_failure(
+                                                &self.conn_data.uri,
+                                            );
                                             bail!("{}", err);
                                         }
                                     }
@@ -272,11 +327,38 @@ impl OnvifCameraClient for OnvifRsCameraClient {
         self.resolve_rtsp_uri().await
     }
 
+    async fn get_rtsp_channels(&self) -> anyhow::Result<Vec<(String, String)>> {
+        if let Some(channels) = &self.rtsp_channels {
+            return Ok(channels.clone());
+        }
+        match self.resolve_rtsp_channels().await {
+            Ok(channels) if !channels.is_empty() => Ok(channels),
+            _ => Ok(vec![("main".to_string(), self.get_rtsp_uri().await?)]),
+        }
+    }
+
     async fn snapshot_via_rtsp(&self) -> anyhow::Result<Vec<u8>> {
         let uri = self.get_rtsp_uri().await?;
+        let uri_with_creds = self.with_credentials(&uri)?;
         let t0 = std::time::Instant::now();
-        let result = capture_snapshot_via_rtsp(&uri).await;
-        tracing::debug!("rtsp snapshot from {} took {}ms", self.conn_data.uri, t0.elapsed().as_millis());
+        let result = capture_snapshot_via_rtsp(&uri_with_creds).await;
+        tracing::debug!(
+            "rtsp snapshot from {} took {}ms",
+            self.conn_data.uri,
+            t0.elapsed().as_millis()
+        );
+        result
+    }
+
+    async fn snapshot_via_rtsp_uri(&self, rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
+        let uri_with_creds = self.with_credentials(rtsp_uri)?;
+        let t0 = std::time::Instant::now();
+        let result = capture_snapshot_via_rtsp(&uri_with_creds).await;
+        tracing::debug!(
+            "rtsp snapshot from channel uri (camera {}) took {}ms",
+            self.conn_data.uri,
+            t0.elapsed().as_millis()
+        );
         result
     }
 
@@ -353,7 +435,11 @@ impl OnvifCameraClient for OnvifRsCameraClient {
                 }
             }
         } else {
-            anyhow::bail!("cannot fix connection for camera:{} of manufacturer: {}", camera_uri, device_info.manufacturer);
+            anyhow::bail!(
+                "cannot fix connection for camera:{} of manufacturer: {}",
+                camera_uri,
+                device_info.manufacturer
+            );
         }
     }
 
@@ -509,13 +595,39 @@ async fn create_event_pull_message_client(
     let uri = Url::parse(&camera_sub.subscription_reference.address)
         .map_err(|e| anyhow::anyhow!("invalid subscription reference address: {}", e))?;
 
-    Ok(ClientBuilder::new(&uri)
+    let username_token_client = ClientBuilder::new(&uri)
         .credentials(Some(onvif::soap::client::Credentials {
             username: conn_data.username.clone(),
             password: conn_data.password.clone(),
         }))
-        .auth_type(AuthType::UsernameToken) // TODO JARR before it was Digest. does this break nay camera?
-        .build())
+        .auth_type(AuthType::UsernameToken)
+        .build();
+
+    let probe = PullMessages {
+        message_limit: 0,
+        timeout: xsd_types::types::Duration {
+            seconds: 1.0,
+            ..Default::default()
+        },
+    };
+
+    match event::pull_messages(&username_token_client, &probe).await {
+        Ok(_) => Ok(username_token_client),
+        Err(err) => {
+            tracing::warn!(
+                "UsernameToken auth rejected by camera {} when probing event subscription ({}); falling back to Digest",
+                conn_data.uri,
+                err
+            );
+            Ok(ClientBuilder::new(&uri)
+                .credentials(Some(onvif::soap::client::Credentials {
+                    username: conn_data.username.clone(),
+                    password: conn_data.password.clone(),
+                }))
+                .auth_type(AuthType::Digest)
+                .build())
+        }
+    }
 }
 
 fn has_item(msg: &NotificationMessageHolderType, name: &str, value: &str) -> bool {
@@ -552,8 +664,21 @@ fn parse_event_type(msg: &PullMessagesResponse) -> Option<CameraEventType> {
     None
 }
 
+fn strip_credentials(uri: &str) -> String {
+    match Url::parse(uri) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        Err(_) => uri.to_string(),
+    }
+}
+
 async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
+
+    let redacted_uri = strip_credentials(rtsp_uri);
 
     let tmp_path = std::env::temp_dir().join(format!(
         "oet_snapshot_{}_{}.jpg",
@@ -582,7 +707,12 @@ async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("cannot execute ffmpeg (¿está instalado y en el PATH?): {}", e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot execute ffmpeg (¿está instalado y en el PATH?): {}",
+                e
+            )
+        })?;
 
     let mut stderr = child.stderr.take();
     let status = match tokio::time::timeout(std::time::Duration::from_secs(15), child.wait()).await
@@ -590,7 +720,7 @@ async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
         Ok(status) => status.map_err(|e| anyhow::anyhow!("ffmpeg wait failed: {}", e))?,
         Err(_) => {
             let _ = child.start_kill();
-            bail!("ffmpeg timed out capturing snapshot via rtsp (¿stream inaccesible?): {rtsp_uri}");
+            bail!("ffmpeg timed out capturing snapshot via rtsp (¿stream inaccesible?): {redacted_uri}");
         }
     };
 
@@ -599,6 +729,7 @@ async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
         if let Some(stderr) = stderr.as_mut() {
             let _ = stderr.read_to_string(&mut err_buf).await;
         }
+        let err_buf = err_buf.replace(rtsp_uri, &redacted_uri);
         bail!("ffmpeg failed capturing snapshot via rtsp: {err_buf}");
     }
 

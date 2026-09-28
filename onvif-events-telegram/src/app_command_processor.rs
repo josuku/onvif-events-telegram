@@ -1,26 +1,30 @@
-use api_camera::dahua_rpc_api_client::DahuaRpcApiCameraClient;
-use api_camera::dvrip_xmeye_client::DvrIpXmeyeApiCameraClient;
-use app_core::domain::camera::{CameraData, CameraStatus, SnapshotMethod};
-use app_core::domain::object::{object_classes_to_string, ObjectClass};
-use app_core::helpers::network::is_reachable;
-use app_core::traits::api_camera_client::ApiCameraClient;
-use app_core::traits::command_processor::DownloadRecordingError;
-use app_core::traits::discovery_client::OnvifRsDiscoveryClient;
-use app_core::traits::onvif_camera_client::OnvifCameraClient;
-use app_core::MessageId;
+use api_camera::{
+    dahua_rpc_api_client::DahuaRpcApiCameraClient, dvrip_xmeye_client::DvrIpXmeyeApiCameraClient,
+    hikvision_isapi_client::HikvisionIsapiApiCameraClient,
+};
 use app_core::{
+    domain::{
+        camera::{CameraData, CameraStatus, SnapshotMethod},
+        object::{object_classes_to_string, ObjectClass},
+    },
+    helpers::network::is_reachable,
     make_caption,
-    traits::{command_processor::CommandProcessor, notifier::Notifier},
-    CameraId, ChatId,
+    traits::{
+        api_camera_client::ApiCameraClient, command_processor::CommandProcessor,
+        command_processor::DownloadRecordingError, discovery_client::OnvifRsDiscoveryClient,
+        notifier::Notifier, onvif_camera_client::OnvifCameraClient,
+    },
+    CameraId, ChatId, MessageId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use onvif::onvif_rs_camera_client::create_onvif_camera_client;
-use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
-use onvif::onvif_rs_service_clients::{DEFAULT_PASSWORD, DEFAULT_USERNAME};
+use onvif::{
+    onvif_rs_camera_client::create_onvif_camera_client,
+    onvif_rs_discovery_client::OnvifDiscoveryClient,
+    onvif_rs_service_clients::{DEFAULT_PASSWORD, DEFAULT_USERNAME},
+};
 use repository::memory_repository::MemoryRepository;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tracing::{error, info};
 
 pub struct AppCommandProcessor {
@@ -357,6 +361,37 @@ impl CommandProcessor for AppCommandProcessor {
         Ok(())
     }
 
+    async fn set_multi_channel_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        enable: bool,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command SetMultiChannelDetection - chat_id:{} camera_id:{} enable:{}",
+            chat_id, camera_id, enable
+        );
+
+        match self
+            .repository
+            .update_multi_channel_detection(camera_id, enable)
+            .await
+        {
+            Ok(_) => {
+                self.send_success(
+                    &format!(
+                        "Multi-channel detection set to '{}' for camera {}",
+                        enable, camera_id
+                    ),
+                    chat_id,
+                )
+                .await
+            }
+            Err(err) => self.send_error(&err.to_string(), chat_id).await,
+        };
+        Ok(())
+    }
+
     async fn get_config(&self, chat_id: ChatId) {
         info!("command GetConfig");
         let config = self.repository.get_config().await;
@@ -421,7 +456,10 @@ CURRENT CONFIG
         {
             Ok(_) => {
                 self.send_success(
-                    &format!("Snapshot method set to '{}' for camera {}", snapshot_method, camera_id),
+                    &format!(
+                        "Snapshot method set to '{}' for camera {}",
+                        snapshot_method, camera_id
+                    ),
                     chat_id,
                 )
                 .await
@@ -590,6 +628,7 @@ CURRENT CONFIG
             snapshot_uri,
             snapshot_method: SnapshotMethod::Api,
             rtsp_uri,
+            multi_channel_detection: false,
             onvif_client: Arc::new(client),
             api_camera_client: None,
             device_info: None,
@@ -798,6 +837,19 @@ async fn make_api_camera_client(camera_data: &mut CameraData) -> Option<Arc<dyn 
                     camera_data.username(),
                     camera_data.password(),
                 ))),
+                "Interlogix" | "TVT" | "Hikvision" => {
+                    let fake_utc = if device_info.model.contains("TVF-1103") {
+                        true
+                    } else {
+                        false
+                    };
+                    Some(Arc::new(HikvisionIsapiApiCameraClient::new(
+                        camera_data.host(),
+                        camera_data.username(),
+                        camera_data.password(),
+                        fake_utc,
+                    )))
+                }
                 manufacturer => {
                     tracing::error!(
                         "download not implemented for this manufacturer: {manufacturer}"

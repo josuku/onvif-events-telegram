@@ -21,6 +21,7 @@ pub struct DbCamera {
     pub snapshot_uri: Option<String>,
     pub snapshot_method: String,
     pub rtsp_uri: Option<String>,
+    pub multi_channel_detection: bool,
     pub subscriptors: Vec<ChatId>,
 }
 
@@ -58,7 +59,8 @@ impl DbStore {
                 password TEXT,
                 snapshot_uri TEXT NULL,
                 snapshot_method TEXT NOT NULL DEFAULT 'api',
-                rtsp_uri TEXT NULL
+                rtsp_uri TEXT NULL,
+                multi_channel_detection BOOLEAN NOT NULL DEFAULT 0
             );
         ";
         connection.execute(query, ()).unwrap();
@@ -69,6 +71,10 @@ impl DbStore {
             (),
         );
         let _ = connection.execute("ALTER TABLE cameras ADD COLUMN rtsp_uri TEXT NULL", ());
+        let _ = connection.execute(
+            "ALTER TABLE cameras ADD COLUMN multi_channel_detection BOOLEAN NOT NULL DEFAULT 0",
+            (),
+        );
 
         query = "
             CREATE TABLE IF NOT EXISTS camera_subscriptions (
@@ -109,7 +115,7 @@ impl DbStore {
         let connection = self.connection.lock().unwrap();
 
         let mut stmt = connection.prepare(
-            "SELECT id, name, uri, address, username, password, snapshot_uri, snapshot_method, rtsp_uri FROM cameras",
+            "SELECT id, name, uri, address, username, password, snapshot_uri, snapshot_method, rtsp_uri, multi_channel_detection FROM cameras",
         )?;
 
         let stored_cameras = stmt.query_map([], |row| {
@@ -121,8 +127,11 @@ impl DbStore {
                 username: row.get("username")?,
                 password: row.get("password")?,
                 snapshot_uri: row.get("snapshot_uri")?,
-                snapshot_method: row.get("snapshot_method").unwrap_or_else(|_| "api".to_string()),
+                snapshot_method: row
+                    .get("snapshot_method")
+                    .unwrap_or_else(|_| "api".to_string()),
                 rtsp_uri: row.get("rtsp_uri")?,
+                multi_channel_detection: row.get("multi_channel_detection").unwrap_or(false),
                 subscriptors: Vec::new(),
             })
         })?;
@@ -249,6 +258,21 @@ impl DbStore {
             .execute(
                 "UPDATE cameras SET snapshot_method = ?1 WHERE id = ?2",
                 [snapshot_method, &camera_id.to_string()],
+            )
+            .unwrap();
+    }
+
+    pub fn update_multi_channel_detection(
+        &self,
+        camera_id: CameraId,
+        multi_channel_detection: bool,
+    ) {
+        let connection = self.connection.lock().unwrap();
+
+        connection
+            .execute(
+                "UPDATE cameras SET multi_channel_detection = ?1 WHERE id = ?2",
+                rusqlite::params![multi_channel_detection, camera_id],
             )
             .unwrap();
     }
