@@ -125,11 +125,15 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         }
 
         let output_file = format!("./{target_name}.mp4");
+
         if let Err(err) = ffmpeg_trim_and_convert(
             Path::new(&target_name_with_extension),
             Path::new(&output_file),
+            None,
             offset_secs,
             duration_secs,
+            None,
+            true,
         )
         .await
         {

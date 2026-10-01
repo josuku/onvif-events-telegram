@@ -183,6 +183,7 @@ pub struct CameraStatus {
     pub last_error_notified: bool,
     pub last_notification_by_chat_id: HashMap<ChatId, chrono::DateTime<Utc>>,
     pub today_notifications: Vec<DateTime<Utc>>,
+    pub event_subscription_failures: u32,
 }
 
 #[derive(Clone)]

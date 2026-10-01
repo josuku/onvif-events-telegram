@@ -83,16 +83,17 @@ impl MemoryRepository {
                     last_error_notified: false,
                     last_notification_by_chat_id: HashMap::new(),
                     today_notifications: Vec::new(),
+                    event_subscription_failures: 0,
                 },
             };
             camera_data.device_info = camera_data.get_device_info().await;
 
-            if camera_data.rtsp_uri.is_none() {
-                if let Ok(rtsp_uri) = camera_data.onvif_client.get_rtsp_uri().await {
-                    self.repo_store
-                        .update_rtsp_uri_from_camera(camera_data.id, &rtsp_uri);
-                    camera_data.rtsp_uri = Some(rtsp_uri);
-                }
+            if camera_data.rtsp_uri.is_none()
+                && let Ok(rtsp_uri) = camera_data.onvif_client.get_rtsp_uri().await
+            {
+                self.repo_store
+                    .update_rtsp_uri_from_camera(camera_data.id, &rtsp_uri);
+                camera_data.rtsp_uri = Some(rtsp_uri);
             }
 
             self.add_camera(camera_data).await?;
@@ -307,6 +308,29 @@ impl MemoryRepository {
             camera.status.last_error_notified = notified;
         } else {
             error!("camera {} not found", camera_id)
+        }
+    }
+
+    pub async fn record_event_subscription_failure(&self, camera_id: CameraId) -> u32 {
+        let mut cameras = self.cameras.lock().await;
+        match cameras.get_mut(&camera_id) {
+            Some(camera) => {
+                camera.status.event_subscription_failures += 1;
+                camera.status.event_subscription_failures
+            }
+            None => {
+                error!("camera {} not found", camera_id);
+                0
+            }
+        }
+    }
+
+    pub async fn reset_event_subscription_failures(&self, camera_id: CameraId) {
+        let mut cameras = self.cameras.lock().await;
+        if let Some(camera) = cameras.get_mut(&camera_id) {
+            camera.status.event_subscription_failures = 0;
+        } else {
+            error!("camera {} not found", camera_id);
         }
     }
 
@@ -578,6 +602,7 @@ impl MemoryRepository {
                         last_error_notified: false,
                         last_notification_by_chat_id: HashMap::new(),
                         today_notifications: Vec::new(),
+                        event_subscription_failures: 0,
                     },
                 };
                 camera_data.device_info = camera_data.get_device_info().await;

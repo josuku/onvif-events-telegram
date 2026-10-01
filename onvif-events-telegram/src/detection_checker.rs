@@ -12,30 +12,12 @@ use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use onvif::onvif_rs_camera_client::create_onvif_camera_client_with_rtsp_hint;
 use repository::memory_repository::MemoryRepository;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock},
-};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
 const MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS: u32 = 3;
 const EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES: u32 = 30;
-
-static EVENT_SUBSCRIPTION_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-fn record_event_subscription_failure(camera_uri: &str) -> u32 {
-    let mut failures = EVENT_SUBSCRIPTION_FAILURES.lock().unwrap();
-    let count = failures.entry(camera_uri.to_string()).or_insert(0);
-    *count += 1;
-    *count
-}
-
-fn reset_event_subscription_failures(camera_uri: &str) {
-    let mut failures = EVENT_SUBSCRIPTION_FAILURES.lock().unwrap();
-    failures.remove(camera_uri);
-}
 
 pub async fn check_for_detections_in_cameras(
     repository: Arc<MemoryRepository>,
@@ -86,23 +68,28 @@ async fn check_camera(
     );
     let onvif_event = match camera.onvif_client.get_event_message().await {
         Ok(Some(event)) => {
-            reset_event_subscription_failures(&camera.onvif_client.get_connection_data().uri);
+            repository
+                .reset_event_subscription_failures(camera_id)
+                .await;
             event
         }
         Ok(None) => {
-            reset_event_subscription_failures(&camera.onvif_client.get_connection_data().uri);
+            repository
+                .reset_event_subscription_failures(camera_id)
+                .await;
             clean_sync_error_and_notify(&camera, &repository, &event_bus).await;
             return;
         }
         Err(err) => {
             let conn_uri = camera.onvif_client.get_connection_data().uri;
-            let failures = record_event_subscription_failure(&conn_uri);
+            let failures = repository
+                .record_event_subscription_failure(camera_id)
+                .await;
 
             let past_threshold = failures > MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS;
             let is_backoff_retry_cycle = past_threshold
                 && (failures - MAX_EVENT_SUBSCRIPTION_RECOVERY_ATTEMPTS)
-                    % EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES
-                    == 0;
+                    .is_multiple_of(EVENT_SUBSCRIPTION_RECOVERY_BACKOFF_CYCLES);
 
             if past_threshold && !is_backoff_retry_cycle {
                 return;

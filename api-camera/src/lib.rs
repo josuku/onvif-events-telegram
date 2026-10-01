@@ -39,33 +39,64 @@ pub async fn run_ffmpeg(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn ffmpeg_trim_and_convert(
     input: &Path,
     output: &Path,
+    input_format: Option<&str>,
     offset_secs: f64,
     duration_secs: f64,
+    video_tag: Option<&str>,
+    has_audio: bool,
 ) -> anyhow::Result<()> {
-    let mut args: Vec<String> = Vec::new();
-    if offset_secs > 0.05 {
-        args.push("-ss".into());
-        args.push(offset_secs.to_string());
+    let input_str = input.to_str().unwrap();
+    let output_str = output.to_str().unwrap();
+    let offset_str = offset_secs.to_string();
+    let duration_str = duration_secs.to_string();
+
+    let common_prefix = || -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(fmt) = input_format {
+            args.push("-f".into());
+            args.push(fmt.into());
+        }
+        if offset_secs > 0.05 {
+            args.push("-ss".into());
+            args.push(offset_str.clone());
+        }
+        args.push("-i".into());
+        args.push(input_str.into());
+        args.push("-t".into());
+        args.push(duration_str.clone());
+        args
+    };
+
+    let common_suffix = || -> Vec<String> {
+        let mut args = Vec::new();
+        if has_audio {
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-b:a".into());
+            args.push("64k".into());
+        }
+        args.push("-movflags".into());
+        args.push("+faststart".into());
+        args.push("-y".into());
+        args.push(output_str.into());
+        args
+    };
+
+    let mut fast_args = common_prefix();
+    fast_args.push("-c:v".into());
+    fast_args.push("copy".into());
+    if let Some(tag) = video_tag {
+        fast_args.push("-tag:v".into());
+        fast_args.push(tag.into());
     }
-    args.push("-i".into());
-    args.push(input.to_str().unwrap().into());
-    args.push("-t".into());
-    args.push(duration_secs.to_string());
-    args.push("-c:v".into());
-    args.push("copy".into());
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-b:a".into());
-    args.push("64k".into());
-    args.push("-movflags".into());
-    args.push("+faststart".into());
-    args.push("-y".into());
-    args.push(output.to_str().unwrap().into());
-    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-    let fast_result = run_ffmpeg(&args_ref).await;
+    fast_args.extend(common_suffix());
+
+    let fast_args_ref: Vec<&str> = fast_args.iter().map(String::as_str).collect();
+    let fast_result = run_ffmpeg(&fast_args_ref).await;
 
     let fast_ok = fast_result.is_ok()
         && tokio::fs::metadata(output)
@@ -82,30 +113,15 @@ pub async fn ffmpeg_trim_and_convert(
         fast_result.err()
     );
 
-    args.clear();
-    if offset_secs > 0.05 {
-        args.push("-ss".into());
-        args.push(offset_secs.to_string());
-    }
-    args.push("-i".into());
-    args.push(input.to_str().unwrap().into());
-    args.push("-t".into());
-    args.push(duration_secs.to_string());
-    args.push("-c:v".into());
-    args.push("libx264".into());
-    args.push("-preset".into());
-    args.push("veryfast".into());
-    args.push("-crf".into());
-    args.push("23".into());
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-b:a".into());
-    args.push("64k".into());
-    args.push("-movflags".into());
-    args.push("+faststart".into());
-    args.push("-y".into());
-    args.push(output.to_str().unwrap().into());
-    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut fallback_args = common_prefix();
+    fallback_args.push("-c:v".into());
+    fallback_args.push("libx264".into());
+    fallback_args.push("-preset".into());
+    fallback_args.push("veryfast".into());
+    fallback_args.push("-crf".into());
+    fallback_args.push("23".into());
+    fallback_args.extend(common_suffix());
 
-    run_ffmpeg(&args_ref).await
+    let fallback_args_ref: Vec<&str> = fallback_args.iter().map(String::as_str).collect();
+    run_ffmpeg(&fallback_args_ref).await
 }

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
 
-use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, get_clip_interval, run_ffmpeg};
+use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval};
 
 // Implementation for XMEye-icSEE compatible chinese cameras. DvrIp is the protocol they use
 
@@ -151,10 +151,17 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
             "download_recording -> file {target_name_with_extension:?} downloaded from camera"
         );
 
+        let total_seconds = (end_time - start_time).num_seconds().max(1);
         let output_file = format!("./{target_name}.mp4");
-        if let Err(err) = ffmpeg_convert_h265(
+
+        if let Err(err) = ffmpeg_trim_and_convert(
             Path::new(&target_name_with_extension),
             Path::new(&output_file),
+            Some("hevc"),
+            0.0,
+            total_seconds as f64,
+            Some("hvc1"),
+            false,
         )
         .await
         {
@@ -199,7 +206,6 @@ impl DvrIpXmeyeApiCameraClient {
             anyhow::bail!("all segments has not a valid date");
         }
 
-        let last_idx = sorted_segments.len() - 1;
         let mut combined = Vec::new();
         let mut any_downloaded = false;
 
@@ -207,8 +213,8 @@ impl DvrIpXmeyeApiCameraClient {
             let clamp_begin = seg_begin.max(want_begin);
             let mut clamp_end = seg_end.min(want_end);
 
-            // remove last second to avoid xmeye firmware freezes
-            if idx != last_idx && clamp_end == seg_end {
+            if clamp_end == seg_end {
+                // xmeye fix, stop 1 second before or it will be continue
                 clamp_end -= Duration::seconds(1);
             }
 
@@ -293,59 +299,4 @@ impl DvrIpXmeyeApiCameraClient {
         tokio::fs::write(&raw_path, &combined).await?;
         Ok(raw_path)
     }
-}
-
-async fn ffmpeg_convert_h265(input: &Path, output: &Path) -> anyhow::Result<()> {
-    let fast_result = run_ffmpeg(&[
-        "-f",
-        "hevc",
-        "-i",
-        input.to_str().unwrap(),
-        "-c",
-        "copy",
-        "-tag:v",
-        "hvc1",
-        "-movflags",
-        "+faststart",
-        "-y",
-        output.to_str().unwrap(),
-    ])
-    .await;
-
-    let fast_ok = fast_result.is_ok()
-        && tokio::fs::metadata(output)
-            .await
-            .map(|m| m.len() > 0)
-            .unwrap_or(false);
-
-    if fast_ok {
-        return Ok(());
-    }
-
-    tracing::warn!(
-        "error doing fast HEVC remux HEVC ({:?}), trying to decoding to H264 as fallback",
-        fast_result.err()
-    );
-
-    run_ffmpeg(&[
-        "-f",
-        "hevc",
-        "-i",
-        input.to_str().unwrap(),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "64k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        output.to_str().unwrap(),
-    ])
-    .await
 }

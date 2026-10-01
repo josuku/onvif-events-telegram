@@ -216,8 +216,11 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
         if let Err(err) = ffmpeg_trim_and_convert(
             Path::new(&raw_name),
             Path::new(&output_file),
+            None,
             offset_secs,
             duration_secs,
+            None,
+            true,
         )
         .await
         {
@@ -304,9 +307,7 @@ fn build_download_body(playback_uri: &str) -> String {
 fn extract_query_param<'a>(uri: &'a str, key: &str) -> Option<&'a str> {
     let query = uri.split('?').nth(1)?;
     query.split('&').find_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
+        let (k, v) = pair.split_once('=')?;
         (k == key).then_some(v)
     })
 }

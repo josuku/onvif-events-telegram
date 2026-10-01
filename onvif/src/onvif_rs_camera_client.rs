@@ -20,9 +20,11 @@ use schema::{
     transport::Transport,
 };
 use std::{
-    collections::HashMap,
     str::FromStr,
-    sync::{Arc, LazyLock},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 use tracing::error;
 use url::Url;
@@ -39,24 +41,10 @@ pub struct OnvifRsCameraClient {
     rtsp_channels: Option<Vec<(String, String)>>,
     http_client: reqwest::Client,
     digest_session: Option<Arc<Mutex<DigestAuthSession>>>,
+    snapshot_uri_recovery_failures: AtomicU32,
 }
 
 const MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS: u32 = 3;
-
-static SNAPSHOT_URI_RECOVERY_FAILURES: LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-fn snapshot_uri_recovery_exhausted(camera_uri: &str) -> bool {
-    let failures = SNAPSHOT_URI_RECOVERY_FAILURES.lock().unwrap();
-    failures.get(camera_uri).copied().unwrap_or(0) >= MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS
-}
-
-fn record_snapshot_uri_recovery_failure(camera_uri: &str) -> u32 {
-    let mut failures = SNAPSHOT_URI_RECOVERY_FAILURES.lock().unwrap();
-    let count = failures.entry(camera_uri.to_string()).or_insert(0);
-    *count += 1;
-    *count
-}
 
 fn is_xmeye_manufacturer(manufacturer: &str) -> bool {
     manufacturer.eq_ignore_ascii_case("H264")
@@ -83,6 +71,7 @@ impl OnvifRsCameraClient {
                 .build()
                 .unwrap_or_default(),
             digest_session: None,
+            snapshot_uri_recovery_failures: AtomicU32::new(0),
         })
     }
 
@@ -196,6 +185,17 @@ impl OnvifRsCameraClient {
             .collect())
     }
 
+    fn snapshot_uri_recovery_exhausted(&self) -> bool {
+        self.snapshot_uri_recovery_failures.load(Ordering::Relaxed)
+            >= MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS
+    }
+
+    fn record_snapshot_uri_recovery_failure(&self) -> u32 {
+        self.snapshot_uri_recovery_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
     fn with_credentials(&self, raw_uri: &str) -> anyhow::Result<String> {
         let mut url = Url::parse(raw_uri)?;
         url.set_username(&self.conn_data.username)
@@ -230,7 +230,7 @@ impl OnvifRsCameraClient {
                                     {
                                         return Ok((snapshot_uri, true));
                                     }
-                                    if snapshot_uri_recovery_exhausted(&self.conn_data.uri) {
+                                    if self.snapshot_uri_recovery_exhausted() {
                                         error!(
                                             "cannot download picture from uri (failed {} times for camera:{}) trying rtsp fallback",
                                             MAX_SNAPSHOT_URI_RECOVERY_ATTEMPTS, self.conn_data.uri
@@ -265,14 +265,10 @@ impl OnvifRsCameraClient {
                                             {
                                                 return Ok((fixed_url, true));
                                             }
-                                            record_snapshot_uri_recovery_failure(
-                                                &self.conn_data.uri,
-                                            );
+                                            self.record_snapshot_uri_recovery_failure();
                                         }
                                         Err(err) => {
-                                            record_snapshot_uri_recovery_failure(
-                                                &self.conn_data.uri,
-                                            );
+                                            self.record_snapshot_uri_recovery_failure();
                                             bail!("{}", err);
                                         }
                                     }
@@ -720,7 +716,7 @@ async fn capture_snapshot_via_rtsp(rtsp_uri: &str) -> anyhow::Result<Vec<u8>> {
         Ok(status) => status.map_err(|e| anyhow::anyhow!("ffmpeg wait failed: {}", e))?,
         Err(_) => {
             let _ = child.start_kill();
-            bail!("ffmpeg timed out capturing snapshot via rtsp (¿stream inaccesible?): {redacted_uri}");
+            bail!("ffmpeg timed out capturing snapshot via rtsp: {redacted_uri}");
         }
     };
 

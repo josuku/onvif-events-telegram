@@ -639,6 +639,7 @@ CURRENT CONFIG
                 last_error_notified: false,
                 last_notification_by_chat_id: HashMap::new(),
                 today_notifications: Vec::new(),
+                event_subscription_failures: 0,
             },
         };
         camera_data.device_info = camera_data.get_device_info().await;
@@ -838,11 +839,7 @@ async fn make_api_camera_client(camera_data: &mut CameraData) -> Option<Arc<dyn 
                     camera_data.password(),
                 ))),
                 "Interlogix" | "TVT" | "Hikvision" => {
-                    let fake_utc = if device_info.model.contains("TVF-1103") {
-                        true
-                    } else {
-                        false
-                    };
+                    let fake_utc = device_info.model.contains("TVF-1103");
                     Some(Arc::new(HikvisionIsapiApiCameraClient::new(
                         camera_data.host(),
                         camera_data.username(),
