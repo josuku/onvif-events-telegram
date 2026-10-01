@@ -13,7 +13,6 @@ use app_core::traits::object_detector::ObjectDetector;
 use app_core::traits::{command_processor::CommandProcessor, notifier::Notifier};
 use repository::db_store::DbStore;
 use repository::memory_repository::MemoryRepository;
-use std::fs::OpenOptions;
 use std::{process::exit, sync::Arc};
 use telegram::{telegram_bot::TelegramBot, telegram_notifier::TelegramNotifier};
 use tokio::sync::Mutex;
@@ -117,15 +116,13 @@ async fn start_polling(
 pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     std::fs::create_dir_all("logs")?;
 
-    // Daily rotation version:
-    // let file_appender = tracing_appender::rolling::daily("logs", "onvif-events.log");
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("onvif-events.log")
+        .max_log_files(30)
+        .build("logs")?;
 
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("logs/onvif-events.log")?;
-
-    let (writer, guard) = non_blocking(file);
+    let (writer, guard) = non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
