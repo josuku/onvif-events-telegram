@@ -84,6 +84,12 @@ pub trait CommandProcessor: Send + Sync {
         event_time: DateTime<Utc>,
         clip_seconds: Duration,
     ) -> Result<(), DownloadRecordingError>;
+    async fn set_camera_zoom(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        zoom_level: u8,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Error, Debug)]

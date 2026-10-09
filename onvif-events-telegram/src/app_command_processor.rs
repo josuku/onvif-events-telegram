@@ -821,6 +821,57 @@ CURRENT CONFIG
         tracing::error!("no api camera client available");
         Err(DownloadRecordingError::RecordingDownloadNotAvailable)
     }
+
+    async fn set_camera_zoom(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        zoom_level: u8,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command Zoom - chat_id:{} camera_id:{} zoom:{}",
+            chat_id, camera_id, zoom_level
+        );
+
+        if !(1..=100).contains(&zoom_level) {
+            let error = "wrong zoom level value. must be between 1-100".to_string();
+            self.send_error(&error, chat_id).await;
+            anyhow::bail!("{error}")
+        }
+
+        let mut camera_data = match self.repository.get_camera(camera_id).await {
+            Some(camera) => camera,
+            None => {
+                let error = format!("camera {} not found", camera_id);
+                self.send_error(&error, chat_id).await;
+                anyhow::bail!("camera not found");
+            }
+        };
+
+        if camera_data.api_camera_client.is_none() {
+            camera_data.api_camera_client = make_api_camera_client(&mut camera_data).await;
+        }
+
+        if let Some(api_camera_client) = camera_data.api_camera_client {
+            match api_camera_client.set_optical_zoom(zoom_level).await {
+                Ok(_) => {
+                    self.send_success(
+                        &format!("camera {} zoomed successfully", camera_id),
+                        chat_id,
+                    )
+                    .await;
+                    return Ok(());
+                }
+                Err(err) => {
+                    let error = format!("cannot zoom on camera {}", camera_id);
+                    self.send_error(&error, chat_id).await;
+                    anyhow::bail!("{err}")
+                }
+            }
+        }
+
+        anyhow::bail!("no api camera client available")
+    }
 }
 
 async fn make_api_camera_client(camera_data: &mut CameraData) -> Option<Arc<dyn ApiCameraClient>> {

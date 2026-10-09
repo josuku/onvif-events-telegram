@@ -32,6 +32,7 @@ pub enum BotCommand {
     SetCameraName(String),
     SetCredentials(String),
     FixSnapshot(CameraId),
+    SetZoom(String),
     // Events
     Subscribe(CameraId),
     Unsubscribe(CameraId),
@@ -404,6 +405,39 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
+        BotCommand::SetZoom(params) => {
+            let mut parts = params.split_whitespace();
+            let (camera_id, zoom_level) = match (parts.next(), parts.next()) {
+                (Some(id), Some(zoom_level)) => {
+                    let id: CameraId = match id.parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /setzoom camera_id 1-100".to_string(),
+                            ))
+                        }
+                    };
+                    let zoom_level: u8 = match zoom_level.parse() {
+                        Ok(zoom_level) => zoom_level,
+                        Err(_) => {
+                            return Err(string_to_response_error(
+                                "usage: /setzoom camera_id 1-100".to_string(),
+                            ))
+                        }
+                    };
+                    (id, zoom_level)
+                }
+                _ => {
+                    return Err(string_to_response_error(
+                        "usage: /setzoom camera_id 1-100".to_string(),
+                    ))
+                }
+            };
+            command_processor
+                .set_camera_zoom(chat_id, camera_id, zoom_level)
+                .await
+                .map_err(anyhow_to_response_error)?
+        }
     };
     Ok(())
 }
@@ -546,6 +580,7 @@ fn help_text() -> String {
 /deletecamera `camera_id` \\- delete a camera
 /setcameraname `camera_id name` \\- rename a camera
 /setcredentials `camera_id username password` \\- update credentials
+/setzoom `camera_id zoom`, \\- zoom camera \\(range 1\\-100\\)
 /fixsnapshot `camera_id` \\- fix or resolve snapshot URI
 
 🔔 *EVENTS*

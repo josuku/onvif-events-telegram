@@ -234,6 +234,10 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
             Ok(output_file)
         }
     }
+
+    async fn set_optical_zoom(&self, _zoom: u8) -> anyhow::Result<()> {
+        anyhow::bail!("not implemented");
+    }
 }
 
 #[derive(Debug, Deserialize)]

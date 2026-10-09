@@ -149,6 +149,14 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
             Ok(output_file)
         }
     }
+
+    async fn set_optical_zoom(&self, zoom: u8) -> anyhow::Result<()> {
+        let mut client = self.connect_and_login().await?;
+        tracing::info!("set_optical_zoom -> connected to Dahua camera");
+        let result = client.set_optical_zoom(zoom).await;
+        client.logout().await.ok();
+        result
+    }
 }
 
 struct DahuaClient {
@@ -399,6 +407,32 @@ impl DahuaClient {
         file.flush().await?;
 
         Ok(())
+    }
+
+    pub async fn set_optical_zoom(&mut self, zoom: u8) -> Result<()> {
+        anyhow::ensure!(zoom <= 100, "zoom must be between 0 and 100");
+        let zoom = f64::from(zoom) / 100.0;
+
+        let inst = self
+            .call("devVideoInput.factory.instance", json!({ "channel": 0 }))
+            .await?;
+        let object_id = inst["result"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("Cannot get devVideoInput instance: {inst}"))?;
+
+        let result = self
+            .call_on_object(
+                "devVideoInput.adjustFocus",
+                json!({ "focus": 0.1724137931034483, "zoom": zoom }),
+                Some(object_id),
+            )
+            .await;
+
+        self.call_on_object("devVideoInput.destroy", json!(null), Some(object_id))
+            .await
+            .ok();
+
+        result.map(|_| ())
     }
 
     fn next_request_id(&mut self) -> u32 {

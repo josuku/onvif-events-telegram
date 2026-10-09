@@ -16,4 +16,5 @@ pub trait ApiCameraClient: Send + Sync {
         clip_time: chrono::Duration,
         target_name: String,
     ) -> anyhow::Result<String>;
+    async fn set_optical_zoom(&self, zoom: u8) -> anyhow::Result<()>;
 }
