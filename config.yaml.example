@@ -22,3 +22,7 @@ default_config: # can be overriden by bot user
     # "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot-dog", "pizza", "donut", "cake", "chair", "couch", "potted-plant", 
     # "bed", "dining-table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell-phone", 
     # "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy-bear", "hair-drier", "toothbrush",
+  manual_detection:
+    enable: false
+    interval_seconds: 30
+    types: []

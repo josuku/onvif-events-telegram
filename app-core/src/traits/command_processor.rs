@@ -90,6 +90,40 @@ pub trait CommandProcessor: Send + Sync {
         camera_id: CameraId,
         zoom_level: u8,
     ) -> anyhow::Result<()>;
+    async fn get_recording_summary_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        days: Option<u32>,
+    ) -> anyhow::Result<()>;
+    async fn get_recording_list_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        date: DateTime<Utc>,
+        clip_seconds: Option<Duration>,
+        page: usize,
+    ) -> anyhow::Result<()>;
+    async fn download_recording_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        date: DateTime<Utc>,
+        clip_seconds: Option<Duration>,
+    ) -> anyhow::Result<()>;
+    async fn manual_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: Option<CameraId>,
+    ) -> anyhow::Result<()>;
+    async fn config_manual_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        enable: bool,
+        interval_seconds: Option<u64>,
+        types: Option<Vec<ObjectClass>>,
+    ) -> anyhow::Result<()>;
+    async fn get_manual_detection_status_cmd(&self, chat_id: ChatId) -> anyhow::Result<()>;
 }
 
 #[derive(Error, Debug)]

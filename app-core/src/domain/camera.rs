@@ -34,16 +34,18 @@ impl std::str::FromStr for SnapshotMethod {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum CameraEventType {
     Motion,
     Tamper,
+    ManualDetection,
 }
 impl fmt::Display for CameraEventType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             CameraEventType::Motion => write!(f, "Motion"),
             CameraEventType::Tamper => write!(f, "Tamper"),
+            CameraEventType::ManualDetection => write!(f, "Manual Detection"),
         }
     }
 }
@@ -186,12 +188,20 @@ pub struct CameraStatus {
     pub event_subscription_failures: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Recording {
     pub name: String,
     pub size_mb: f64,
     pub begin: String,
     pub end: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecordingSummary {
+    pub total_files: usize,
+    pub total_size_mb: f64,
+    pub first_begin: Option<String>,
+    pub last_end: Option<String>,
 }
 
 #[derive(Clone)]

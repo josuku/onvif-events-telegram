@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use app_core::domain::camera::Recording;
+use app_core::domain::camera::{Recording, RecordingSummary};
 use app_core::traits::api_camera_client::ApiCameraClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
@@ -160,6 +160,95 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
             .collect();
 
         Ok(recordings)
+    }
+
+    async fn get_recording_summary(
+        &self,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+    ) -> Result<RecordingSummary> {
+        let end = end_time.unwrap_or_else(Utc::now);
+        let start = start_time.unwrap_or_else(|| end - Duration::days(30));
+
+        let local_offset = self
+            .local_time_labeled_as_utc
+            .then(|| *end.with_timezone(&Local).offset());
+
+        let (query_start, query_end) = match local_offset {
+            Some(offset) => (
+                fake_utc_with_offset(start, offset),
+                fake_utc_with_offset(end, offset),
+            ),
+            None => (start, end),
+        };
+
+        let body = build_search_body(DEFAULT_TRACK_ID, query_start, query_end);
+
+        let resp = self
+            .http
+            .post(format!("{}/ISAPI/ContentMgmt/search", self.base_url()))
+            .basic_auth(&self.user, Some(&self.password))
+            .header("Content-Type", "application/xml")
+            .body(body)
+            .send()
+            .await
+            .context("Network error calling ISAPI search")?;
+
+        if !resp.status().is_success() {
+            bail!("ISAPI search failed (HTTP {})", resp.status());
+        }
+
+        let xml = resp
+            .text()
+            .await
+            .context("Cannot read ISAPI search response body")?;
+
+        let parsed: CmSearchResult =
+            quick_xml::de::from_str(&xml).context("Cannot parse ISAPI search XML")?;
+
+        let total_files = parsed.match_list.items.len();
+        let total_size_mb: f64 = parsed
+            .match_list
+            .items
+            .iter()
+            .map(|item| {
+                extract_query_param(&item.descriptor.playback_uri, "size")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|bytes| bytes / 1024.0 / 1024.0)
+                    .unwrap_or(0.0)
+            })
+            .sum();
+
+        let first_begin = parsed.match_list.items.first().map(|item| {
+            match local_offset {
+                Some(offset) => correct_fake_utc(&item.time_span.start_time, offset)
+                    .unwrap_or_else(|_| item.time_span.start_time.clone()),
+                None => item.time_span.start_time.clone(),
+            }
+        });
+
+        let last_end = parsed.match_list.items.last().map(|item| {
+            match local_offset {
+                Some(offset) => correct_fake_utc(&item.time_span.end_time, offset)
+                    .unwrap_or_else(|_| item.time_span.end_time.clone()),
+                None => item.time_span.end_time.clone(),
+            }
+        });
+
+        Ok(RecordingSummary {
+            total_files,
+            total_size_mb,
+            first_begin,
+            last_end,
+        })
+    }
+
+    async fn get_recording_list(
+        &self,
+        time: DateTime<Utc>,
+        clip_time: Duration,
+    ) -> Result<Vec<Recording>> {
+        self.get_recordings(time, clip_time).await
     }
 
     async fn download_recording(
@@ -345,9 +434,15 @@ pub fn get_chosen_isapi_recording(
         })
         .collect();
 
+    // Prefer recordings where event_time falls inside [begin, end)
     parsed
         .iter()
-        .find(|(_, begin, end)| *begin <= event_time && event_time <= *end)
+        .find(|(_, begin, end)| *begin <= event_time && event_time < *end)
+        .or_else(|| {
+            parsed
+                .iter()
+                .find(|(_, begin, end)| *begin <= event_time && event_time <= *end)
+        })
         .or_else(|| {
             parsed
                 .iter()

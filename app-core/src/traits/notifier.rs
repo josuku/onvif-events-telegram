@@ -30,4 +30,11 @@ pub trait Notifier: Send + Sync {
         chat_id: ChatId,
         message_id: Option<MessageId>,
     ) -> anyhow::Result<()>;
+
+    async fn send_text_message_with_buttons(
+        &self,
+        message: String,
+        buttons: Vec<Vec<(String, String)>>,
+        chat_id: ChatId,
+    ) -> anyhow::Result<()>;
 }

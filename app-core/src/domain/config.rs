@@ -1,5 +1,5 @@
 use crate::domain::object::ObjectClass;
-use serde::Deserialize;
+use serde::{Deserialize};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -22,6 +22,7 @@ pub struct BotConfig {
     pub auto_renewal: bool,
     pub recording_clip: u64,
     pub detector: DetectorConfig,
+    pub manual_detection: ManualDetectionConfig,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -29,4 +30,21 @@ pub struct DetectorConfig {
     pub enable: bool,
     pub min_confidence: f32,
     pub types: Vec<ObjectClass>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ManualDetectionConfig {
+    pub enable: bool,
+    pub interval_seconds: u64,
+    pub types: Vec<ObjectClass>,
+}
+
+impl Default for ManualDetectionConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            interval_seconds: 30,
+            types: Vec::new(),
+        }
+    }
 }

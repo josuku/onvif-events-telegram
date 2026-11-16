@@ -1,11 +1,13 @@
 mod app_command_processor;
 mod daily_report;
 mod detection_checker;
+mod manual_detection_checker;
 mod subscription_manager;
 
 use crate::app_command_processor::AppCommandProcessor;
 use crate::daily_report::manage_daily_report;
 use crate::detection_checker::check_for_detections_in_cameras;
+use crate::manual_detection_checker::start_manual_detection_loop;
 use crate::subscription_manager::{close_subscriptions, renew_subscriptions};
 use app_core::domain::config::AppConfig;
 use app_core::domain::event_bus::EventBus;
@@ -45,13 +47,14 @@ async fn main() {
         repository.clone(),
     ));
 
+    let object_detector: Arc<Mutex<dyn ObjectDetector>> = Arc::new(Mutex::new(
+        UltralyticsDetector::new("./models/yolo11n.onnx").expect("cannot create object detector"),
+    ));
+
     let app_command_processor: Arc<dyn CommandProcessor> = Arc::new(AppCommandProcessor::new(
         repository.clone(),
         notifier.clone(),
-    ));
-
-    let object_detector: Arc<Mutex<dyn ObjectDetector>> = Arc::new(Mutex::new(
-        UltralyticsDetector::new("./models/yolo11n.onnx").expect("cannot create object detector"),
+        object_detector.clone(),
     ));
 
     let telegram_bot = Arc::new(TelegramBot::new(
@@ -65,7 +68,8 @@ async fn main() {
 
     select! {
         _ = start_bot(telegram_bot) => (),
-        _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector) => (),
+        _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector.clone()) => (),
+        _ = start_manual_detection_loop(repository.clone(), event_bus.clone(), object_detector) => (),
         _ = renew_subscriptions(repository.clone()) => (),
         _ = shutdown_signal() => {
             close_subscriptions(repository).await;

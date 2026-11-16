@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use app_core::{domain::camera::Recording, traits::api_camera_client::ApiCameraClient};
+use app_core::{
+    domain::camera::{Recording, RecordingSummary},
+    traits::api_camera_client::ApiCameraClient,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
@@ -124,6 +127,123 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
         Ok(recordings)
     }
 
+    async fn get_recording_summary(
+        &self,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<RecordingSummary> {
+        let end = end_time.unwrap_or_else(Utc::now);
+        let start = start_time.unwrap_or_else(|| end - Duration::days(30));
+
+        let mut cam = self.connect_and_login().await?;
+        let result = cam
+            .list_local_files(
+                chrono::DateTime::from(start),
+                chrono::DateTime::from(end),
+                "video",
+                0,
+            )
+            .await;
+        cam.close().await?;
+
+        let files = result?;
+        let total_files = files.len();
+        let mut total_size_mb = 0.0;
+        let mut first_begin = None;
+        let mut last_end = None;
+
+        for (i, file) in files.iter().enumerate() {
+            let size_str = file
+                .get("FileLength")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0");
+            let size =
+                u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
+            // FileLength in DVRIP is in KB, so dividing by 1024 gives MB.
+            total_size_mb += size as f64 / 1024.0;
+
+            if i == 0 {
+                first_begin = file
+                    .get("BeginTime")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
+            }
+            if i == files.len() - 1 {
+                last_end = file
+                    .get("EndTime")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+
+        Ok(RecordingSummary {
+            total_files,
+            total_size_mb,
+            first_begin,
+            last_end,
+        })
+    }
+
+    async fn get_recording_list(
+        &self,
+        time: chrono::DateTime<chrono::Utc>,
+        clip_time: chrono::Duration,
+    ) -> anyhow::Result<Vec<Recording>> {
+        let mut recordings = Vec::new();
+        let (start_time, end_time) = get_clip_interval(time, clip_time);
+
+        let mut cam = self.connect_and_login().await?;
+        let result = cam
+            .list_local_files(
+                chrono::DateTime::from(start_time),
+                chrono::DateTime::from(end_time),
+                "video",
+                0,
+            )
+            .await;
+        cam.close().await?;
+
+        match result {
+            Ok(files) => {
+                tracing::info!("Found {} files.", files.len());
+                for file in files {
+                    let name = file
+                        .get("FileName")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let size_str = file
+                        .get("FileLength")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("0");
+                    let size =
+                        u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
+                    let size_mb = size as f64 / 1024.0;
+                    let begin = file
+                        .get("BeginTime")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let end = file
+                        .get("EndTime")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+
+                    recordings.push(Recording {
+                        name,
+                        size_mb,
+                        begin,
+                        end,
+                    });
+                }
+            }
+            Err(e) => anyhow::bail!("Error listing files: {}", e),
+        }
+
+        Ok(recordings)
+    }
+
     async fn download_recording(
         &self,
         recordings: &[Recording],
@@ -144,7 +264,7 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
         }
 
         let target_name_with_extension = self
-            .download_window(recordings, start_time, end_time, &target_name)
+            .download_window(recordings, event_time, start_time, end_time, &target_name)
             .await?;
 
         tracing::info!(
@@ -187,6 +307,7 @@ impl DvrIpXmeyeApiCameraClient {
     async fn download_window(
         &self,
         recordings: &[Recording],
+        event_time: DateTime<Utc>,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
         target_name: &str,
@@ -213,7 +334,35 @@ impl DvrIpXmeyeApiCameraClient {
         let mut combined = Vec::new();
         let mut any_downloaded = false;
 
-        for (idx, (seg_begin, seg_end)) in sorted_segments.into_iter().enumerate() {
+        // If there's an exact file that matches event_time or contains it, restrict the download
+        // strictly to that segment to avoid downloading adjacent segments that share boundary timestamps.
+        let local_offset = *event_time.with_timezone(&Local).offset();
+        let target_segment = sorted_segments
+            .iter()
+            .find(|(begin, end)| {
+                let seg_b = local_offset
+                    .from_local_datetime(begin)
+                    .single()
+                    .map(|dt| dt.with_timezone(&Utc));
+                let seg_e = local_offset
+                    .from_local_datetime(end)
+                    .single()
+                    .map(|dt| dt.with_timezone(&Utc));
+                if let (Some(b), Some(e)) = (seg_b, seg_e) {
+                    b <= event_time && event_time < e
+                } else {
+                    false
+                }
+            })
+            .copied();
+
+        let segments_to_download: Vec<(NaiveDateTime, NaiveDateTime)> = if let Some(target) = target_segment {
+            vec![target]
+        } else {
+            sorted_segments
+        };
+
+        for (idx, (seg_begin, seg_end)) in segments_to_download.into_iter().enumerate() {
             let clamp_begin = seg_begin.max(want_begin);
             let mut clamp_end = seg_end.min(want_end);
 

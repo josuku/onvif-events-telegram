@@ -3,7 +3,7 @@ use app_core::{
     CameraId, ChatId, SubscriptionId,
     domain::{
         camera::CameraConnectionData,
-        config::{BotConfig, DetectorConfig},
+        config::{BotConfig, DetectorConfig, ManualDetectionConfig},
         object::{object_classes_to_string, string_to_object_classes},
     },
 };
@@ -105,10 +105,26 @@ impl DbStore {
                 detector_enable BOOLEAN NOT NULL,
                 detector_min_confidence DECIMAL NOT NULL,
                 detector_types TEXT NOT NULL,
+                manual_detection_enable BOOLEAN NOT NULL DEFAULT 0,
+                manual_detection_interval INTEGER NOT NULL DEFAULT 30,
+                manual_detection_types TEXT NOT NULL DEFAULT '',
                 updated_by_chat_id INTEGER NOT NULL
             );
         ";
         connection.execute(query, ()).unwrap();
+
+        let _ = connection.execute(
+            "ALTER TABLE settings ADD COLUMN manual_detection_enable BOOLEAN NOT NULL DEFAULT 0",
+            (),
+        );
+        let _ = connection.execute(
+            "ALTER TABLE settings ADD COLUMN manual_detection_interval INTEGER NOT NULL DEFAULT 30",
+            (),
+        );
+        let _ = connection.execute(
+            "ALTER TABLE settings ADD COLUMN manual_detection_types TEXT NOT NULL DEFAULT ''",
+            (),
+        );
     }
 
     pub fn get_cameras(&self) -> anyhow::Result<Vec<DbCamera>> {
@@ -374,9 +390,10 @@ impl DbStore {
         connection
             .execute(
                 "INSERT OR REPLACE INTO settings 
-                        (id, polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types, updated_by_chat_id)
-                      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
-            (bot_config.polling_seconds as i64,
+                        (id, polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types, manual_detection_enable, manual_detection_interval, manual_detection_types, updated_by_chat_id)
+                      VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
+                (
+                    bot_config.polling_seconds as i64,
                     bot_config.between_seconds as i64,
                     bot_config.send_errors,
                     bot_config.auto_renewal,
@@ -384,7 +401,11 @@ impl DbStore {
                     bot_config.detector.enable,
                     bot_config.detector.min_confidence,
                     object_classes_to_string(&bot_config.detector.types),
-                    chat_id)
+                    bot_config.manual_detection.enable,
+                    bot_config.manual_detection.interval_seconds as i64,
+                    object_classes_to_string(&bot_config.manual_detection.types),
+                    chat_id,
+                ),
             )
             .unwrap();
     }
@@ -392,7 +413,7 @@ impl DbStore {
     pub fn get_config(&self) -> anyhow::Result<Option<BotConfig>> {
         let connection = self.connection.lock().unwrap();
         let mut stmt = connection.prepare(
-            "SELECT polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types FROM settings WHERE id = 1",
+            "SELECT polling_seconds, between_seconds, send_errors, auto_renewal, recording_clip, detector_enable, detector_min_confidence, detector_types, manual_detection_enable, manual_detection_interval, manual_detection_types FROM settings WHERE id = 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
             let polling_seconds: i64 = row.get(0)?;
@@ -403,6 +424,9 @@ impl DbStore {
             let detector_enable: bool = row.get(5)?;
             let detector_min_confidence: f32 = row.get(6)?;
             let object_types: String = row.get(7)?;
+            let manual_detection_enable: bool = row.get(8).unwrap_or(false);
+            let manual_detection_interval: i64 = row.get(9).unwrap_or(30);
+            let manual_detection_types: String = row.get(10).unwrap_or_default();
             Ok(BotConfig {
                 polling_seconds: polling_seconds as u64,
                 between_seconds: between_seconds as u64,
@@ -413,6 +437,11 @@ impl DbStore {
                     enable: detector_enable,
                     min_confidence: detector_min_confidence,
                     types: string_to_object_classes(&object_types),
+                },
+                manual_detection: ManualDetectionConfig {
+                    enable: manual_detection_enable,
+                    interval_seconds: manual_detection_interval as u64,
+                    types: string_to_object_classes(&manual_detection_types),
                 },
             })
         })?;

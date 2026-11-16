@@ -8,7 +8,7 @@ pub mod dvrip_xmeye_client;
 pub mod hikvision_isapi_client;
 
 const MAX_FILES: usize = 5;
-const MAX_DOWNLOAD_SECONDS: i64 = 300; // 5 minutes
+const MAX_DOWNLOAD_SECONDS: i64 = 600; // 10 minutes
 const _MAX_FILE_SIZE_MB: i64 = 50; // Telegram bot limits
 
 pub fn get_clip_interval(

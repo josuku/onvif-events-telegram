@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use repository::memory_repository::MemoryRepository;
 use std::{path::Path, sync::Arc, time::Duration};
 use teloxide::{
-    payloads::{SendPhotoSetters, SendVideoSetters},
+    payloads::{SendMessageSetters, SendPhotoSetters, SendVideoSetters},
     prelude::Requester,
     types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyParameters},
     Bot,
@@ -140,6 +140,34 @@ impl Notifier for TelegramNotifier {
 
         if let Err(err) = result {
             bail!("{:?}", err)
+        }
+        Ok(())
+    }
+
+    async fn send_text_message_with_buttons(
+        &self,
+        message: String,
+        buttons: Vec<Vec<(String, String)>>,
+        chat_id: ChatId,
+    ) -> anyhow::Result<()> {
+        let keyboard: Vec<Vec<InlineKeyboardButton>> = buttons
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(text, callback_data)| {
+                        InlineKeyboardButton::callback(text, callback_data)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        if let Err(err) = self
+            .client
+            .send_message(teloxide::prelude::ChatId(chat_id), message)
+            .reply_markup(InlineKeyboardMarkup::new(keyboard))
+            .await
+        {
+            bail!("cannot send message with buttons to Telegram: {:?}", err);
         }
         Ok(())
     }

@@ -12,7 +12,8 @@ use app_core::{
     traits::{
         api_camera_client::ApiCameraClient, command_processor::CommandProcessor,
         command_processor::DownloadRecordingError, discovery_client::OnvifRsDiscoveryClient,
-        notifier::Notifier, onvif_camera_client::OnvifCameraClient,
+        notifier::Notifier, object_detector::ObjectDetector,
+        onvif_camera_client::OnvifCameraClient,
     },
     CameraId, ChatId, MessageId,
 };
@@ -25,18 +26,25 @@ use onvif::{
 };
 use repository::memory_repository::MemoryRepository;
 use std::{collections::HashMap, sync::Arc};
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 pub struct AppCommandProcessor {
     repository: Arc<MemoryRepository>,
     notifier: Arc<dyn Notifier>,
+    object_detector: Arc<Mutex<dyn ObjectDetector>>,
 }
 
 impl AppCommandProcessor {
-    pub fn new(repository: Arc<MemoryRepository>, notifier: Arc<dyn Notifier>) -> Self {
+    pub fn new(
+        repository: Arc<MemoryRepository>,
+        notifier: Arc<dyn Notifier>,
+        object_detector: Arc<Mutex<dyn ObjectDetector>>,
+    ) -> Self {
         Self {
             repository,
             notifier,
+            object_detector,
         }
     }
 
@@ -99,6 +107,127 @@ impl AppCommandProcessor {
                         &Vec::new(),
                     ),
                     snapshot.clone(),
+                    chat_id,
+                    camera_id,
+                    &chrono::Utc::now(),
+                )
+                .await;
+        });
+    }
+
+    async fn get_api_camera_client(
+        &self,
+        camera_id: CameraId,
+        chat_id: ChatId,
+    ) -> Option<(CameraData, Arc<dyn ApiCameraClient>)> {
+        let mut camera_data = match self.repository.get_camera(camera_id).await {
+            Some(camera) => camera,
+            None => {
+                let error = format!("camera {} not found", camera_id);
+                self.send_error(&error, chat_id).await;
+                return None;
+            }
+        };
+
+        if camera_data.api_camera_client.is_none() {
+            camera_data.api_camera_client = make_api_camera_client(&mut camera_data).await;
+        }
+
+        match camera_data.api_camera_client.clone() {
+            Some(client) => Some((camera_data, client)),
+            None => {
+                let error = format!("recording API not available for camera {}", camera_id);
+                self.send_error(&error, chat_id).await;
+                None
+            }
+        }
+    }
+
+    async fn resolve_clip_duration(&self, clip_seconds: Option<Duration>) -> Duration {
+        match clip_seconds {
+            Some(d) => d,
+            None => {
+                let config = self.repository.get_config().await;
+                Duration::seconds(config.recording_clip as i64)
+            }
+        }
+    }
+
+    async fn detect_of_camera_id(&self, chat_id: ChatId, camera_id: CameraId) {
+        let repository = self.repository.clone();
+        let notifier = self.notifier.clone();
+        let object_detector = self.object_detector.clone();
+
+        tokio::spawn(async move {
+            let camera = match repository.get_camera(camera_id).await {
+                Some(camera) => camera,
+                None => {
+                    let error = format!("❌ cannot find camera with id: {camera_id}");
+                    notifier
+                        .send_text_message(error.clone(), vec![chat_id])
+                        .await;
+                    tracing::error!(error);
+                    return;
+                }
+            };
+
+            let snapshot = match camera.get_snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    let error = format!(
+                        "❌ error getting snapshot from camera:{:?} err:{}",
+                        camera.name, err
+                    );
+                    notifier
+                        .send_text_message(error.clone(), vec![chat_id])
+                        .await;
+                    tracing::error!(error);
+                    return;
+                }
+            };
+
+            let config = repository.get_config().await;
+            let objects = {
+                let mut detector = object_detector.lock().await;
+                match detector.detect(
+                    &snapshot,
+                    config.detector.min_confidence,
+                    &config.detector.types,
+                ) {
+                    Ok(objs) => objs,
+                    Err(err) => {
+                        tracing::error!(
+                            "error detecting objects in camera {}: {}",
+                            camera.name,
+                            err
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+
+            let caption = if objects.is_empty() {
+                format!(
+                    "MANUAL DETECTION\nCamera: {} (id:{})\nTime: {}\nNo objects detected",
+                    camera.name,
+                    camera.id,
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z")
+                )
+            } else {
+                make_caption(
+                    "Manual Detection",
+                    &camera.name,
+                    &camera.id,
+                    &chrono::Utc::now(),
+                    None,
+                    &objects,
+                )
+            };
+
+            let _ = notifier
+                .send_picture_message(
+                    &caption,
+                    snapshot,
                     chat_id,
                     camera_id,
                     &chrono::Utc::now(),
@@ -871,6 +1000,439 @@ CURRENT CONFIG
         }
 
         anyhow::bail!("no api camera client available")
+    }
+
+    async fn get_recording_summary_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        days: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let days_count = days.unwrap_or(30) as i64;
+        info!(
+            "command GetRecordingSummary - chat_id:{chat_id} camera_id:{camera_id} days:{days_count}"
+        );
+
+        let (camera_data, api_client) = match self.get_api_camera_client(camera_id, chat_id).await {
+            Some(res) => res,
+            None => return Ok(()),
+        };
+
+        let now = chrono::Utc::now();
+        let start_time = now - chrono::Duration::days(days_count);
+
+        let summary = match api_client
+            .get_recording_summary(Some(start_time), Some(now))
+            .await
+        {
+            Ok(sum) => sum,
+            Err(err) => {
+                let error = format!("cannot get recording summary for camera {camera_id}: {err}");
+                self.send_error(&error, chat_id).await;
+                return Ok(());
+            }
+        };
+
+        if summary.total_files == 0 {
+            self.notifier
+                .send_text_message(
+                    format!(
+                        "📹 RECORDINGS SUMMARY\nCamera: {} (id:{})\nPeriod queried: last {} days\nResult: No recordings found",
+                        camera_data.name, camera_id, days_count,
+                    ),
+                    vec![chat_id],
+                )
+                .await;
+            return Ok(());
+        }
+
+        let first_begin = summary.first_begin.as_deref().unwrap_or("-");
+        let last_end = summary.last_end.as_deref().unwrap_or("-");
+
+        let size_display = if summary.total_size_mb >= 1024.0 {
+            format!("{:.2} GB", summary.total_size_mb / 1024.0)
+        } else {
+            format!("{:.2} MB", summary.total_size_mb)
+        };
+
+        let msg = format!(
+            "📹 RECORDINGS SUMMARY\nCamera: {} (id:{})\nFrom: {}\nTo: {}\nTotal files: {}\nStorage used: {}",
+            camera_data.name,
+            camera_id,
+            first_begin,
+            last_end,
+            summary.total_files,
+            size_display,
+        );
+
+        self.notifier.send_text_message(msg, vec![chat_id]).await;
+        Ok(())
+    }
+
+    async fn get_recording_list_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        date: DateTime<Utc>,
+        clip_seconds: Option<Duration>,
+        page: usize,
+    ) -> anyhow::Result<()> {
+        info!("command GetRecordingList - chat_id:{chat_id} camera_id:{camera_id} date:{date} page:{page}");
+
+        let (camera_data, api_client) = match self.get_api_camera_client(camera_id, chat_id).await {
+            Some(res) => res,
+            None => return Ok(()),
+        };
+
+        let clip = self.resolve_clip_duration(clip_seconds).await;
+        let recordings = match api_client.get_recording_list(date, clip).await {
+            Ok(rec) => rec,
+            Err(err) => {
+                let error = format!("cannot get recording list for camera {camera_id}: {err}");
+                self.send_error(&error, chat_id).await;
+                return Ok(());
+            }
+        };
+
+        let local_date: DateTime<chrono::Local> = DateTime::from(date);
+        if recordings.is_empty() {
+            self.notifier
+                .send_text_message(
+                    format!(
+                        "📹 RECORDING FILES\nCamera: {} (id:{})\nDate: {}\nResult: No recordings found in this interval",
+                        camera_data.name,
+                        camera_id,
+                        local_date.format("%Y-%m-%d %H:%M:%S"),
+                    ),
+                    vec![chat_id],
+                )
+                .await;
+            return Ok(());
+        }
+
+        let total_items = recordings.len();
+        let page_size = 10;
+        let total_pages = (total_items + page_size - 1) / page_size;
+        let current_page = page.max(1).min(total_pages);
+        let start_index = (current_page - 1) * page_size;
+        let end_index = (start_index + page_size).min(total_items);
+
+        let page_items = &recordings[start_index..end_index];
+
+        let mut lines = vec![format!(
+            "📹 RECORDING FILES\nCamera: {} (id:{})\nShowing: {}-{} of {} file(s) (Page {}/{})",
+            camera_data.name,
+            camera_id,
+            start_index + 1,
+            end_index,
+            total_items,
+            current_page,
+            total_pages
+        )];
+
+        let mut buttons: Vec<Vec<(String, String)>> = Vec::new();
+
+        for (idx_offset, r) in page_items.iter().enumerate() {
+            let item_num = start_index + idx_offset + 1;
+            let size_text = if r.size_mb >= 1024.0 {
+                format!("{:.2} GB", r.size_mb / 1024.0)
+            } else {
+                format!("{:.2} MB", r.size_mb)
+            };
+
+            lines.push(format!(
+                "{}. `{}`\n- From: {}\n- To: {}\n- Size: {}\n",
+                item_num,
+                r.name,
+                r.begin,
+                r.end,
+                size_text,
+            ));
+
+            // Try to get rfc3339 timestamp from r.begin.
+            // Dahua and most camera APIs return begin/end formatted as local camera time ("%Y-%m-%d %H:%M:%S").
+            // We must convert it from Local timezone to Utc so that subsequent queries look for the proper time window.
+            let ts_rfc3339 = if let Ok(parsed) = DateTime::parse_from_rfc3339(&r.begin) {
+                parsed.with_timezone(&Utc).to_rfc3339()
+            } else if let Ok(naive) =
+                chrono::NaiveDateTime::parse_from_str(&r.begin, "%Y-%m-%d %H:%M:%S")
+            {
+                use chrono::TimeZone;
+                match chrono::Local.from_local_datetime(&naive).single() {
+                    Some(local_dt) => local_dt.with_timezone(&Utc).to_rfc3339(),
+                    None => DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).to_rfc3339(),
+                }
+            } else {
+                date.to_rfc3339()
+            };
+
+            // Calculate duration of the file if begin and end can be parsed
+            let file_duration_secs = if let (Ok(b_naive), Ok(e_naive)) = (
+                chrono::NaiveDateTime::parse_from_str(&r.begin, "%Y-%m-%d %H:%M:%S"),
+                chrono::NaiveDateTime::parse_from_str(&r.end, "%Y-%m-%d %H:%M:%S"),
+            ) {
+                Some((e_naive - b_naive).num_seconds().max(1))
+            } else if let (Ok(b_dt), Ok(e_dt)) = (
+                DateTime::parse_from_rfc3339(&r.begin),
+                DateTime::parse_from_rfc3339(&r.end),
+            ) {
+                Some((e_dt - b_dt).num_seconds().max(1))
+            } else {
+                None
+            };
+
+            let label = format!("⬇️ #{} ({})", item_num, size_text);
+            let callback_data = match file_duration_secs {
+                Some(dur) => format!("recording|{}|{}|{}", camera_id, ts_rfc3339, dur),
+                None => format!("recording|{}|{}", camera_id, ts_rfc3339),
+            };
+            buttons.push(vec![(label, callback_data)]);
+        }
+
+        // Add pagination navigation row if there's more than 1 page
+        if total_pages > 1 {
+            let mut nav_row: Vec<(String, String)> = Vec::new();
+            let date_rfc = date.to_rfc3339();
+            let clip_str = clip_seconds
+                .map(|c| c.num_seconds().to_string())
+                .unwrap_or_default();
+
+            // First page button
+            if current_page > 1 {
+                nav_row.push((
+                    "⏮️ 1".to_string(),
+                    format!("recpage|{}|{}|{}|1", camera_id, date_rfc, clip_str),
+                ));
+                nav_row.push((
+                    format!("◀️ Prev ({})", current_page - 1),
+                    format!(
+                        "recpage|{}|{}|{}|{}",
+                        camera_id,
+                        date_rfc,
+                        clip_str,
+                        current_page - 1
+                    ),
+                ));
+            }
+
+            // Next & Last buttons
+            if current_page < total_pages {
+                nav_row.push((
+                    format!("Next ({}) ▶️", current_page + 1),
+                    format!(
+                        "recpage|{}|{}|{}|{}",
+                        camera_id,
+                        date_rfc,
+                        clip_str,
+                        current_page + 1
+                    ),
+                ));
+                nav_row.push((
+                    format!("⏭️ {}", total_pages),
+                    format!(
+                        "recpage|{}|{}|{}|{}",
+                        camera_id, date_rfc, clip_str, total_pages
+                    ),
+                ));
+            }
+
+            if !nav_row.is_empty() {
+                buttons.push(nav_row);
+            }
+        }
+
+        let text = lines.join("\n");
+        if !buttons.is_empty() {
+            if let Err(err) = self
+                .notifier
+                .send_text_message_with_buttons(text.clone(), buttons, chat_id)
+                .await
+            {
+                tracing::warn!("could not send with buttons: {err}, falling back to plain text");
+                self.notifier.send_text_message(text, vec![chat_id]).await;
+            }
+        } else {
+            self.notifier.send_text_message(text, vec![chat_id]).await;
+        }
+
+        Ok(())
+    }
+
+    async fn download_recording_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: CameraId,
+        date: DateTime<Utc>,
+        clip_seconds: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        info!("command DownloadRecording - chat_id:{chat_id} camera_id:{camera_id} date:{date}");
+
+        let (_, api_client) = match self.get_api_camera_client(camera_id, chat_id).await {
+            Some(res) => res,
+            None => return Ok(()),
+        };
+
+        let clip = self.resolve_clip_duration(clip_seconds).await;
+
+        self.notifier
+            .send_text_message(
+                format!("⏳ Searching and downloading recording for camera {camera_id}..."),
+                vec![chat_id],
+            )
+            .await;
+
+        let notifier = self.notifier.clone();
+        tokio::spawn(async move {
+            let recordings = match api_client.get_recordings(date, clip).await {
+                Ok(rec) => rec,
+                Err(err) => {
+                    let err_msg = format!("❌ Error getting recordings for camera {camera_id}: {err}");
+                    notifier.send_text_message(err_msg, vec![chat_id]).await;
+                    return;
+                }
+            };
+
+            if recordings.is_empty() {
+                let msg = format!("❌ No recordings found for camera {camera_id} at requested date");
+                notifier.send_text_message(msg, vec![chat_id]).await;
+                return;
+            }
+
+            let target_name = format!(
+                "{}_{}_{}",
+                camera_id,
+                date.timestamp_millis(),
+                rand::random::<u32>()
+            );
+
+            match api_client
+                .download_recording(&recordings, date, clip, target_name)
+                .await
+            {
+                Ok(file_path) => {
+                    match notifier.send_video_message(&file_path, chat_id, None).await {
+                        Ok(_) => {
+                            tracing::info!("deleting file {file_path:?} after send");
+                            tokio::fs::remove_file(&file_path).await.ok();
+                        }
+                        Err(err) => {
+                            tracing::error!("cannot send video message: {err}");
+                            notifier
+                                .send_text_message(
+                                    format!("❌ Error sending video: {err}"),
+                                    vec![chat_id],
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!("cannot download recording: {err}");
+                    notifier
+                        .send_text_message(
+                            format!("❌ Error downloading recording: {err}"),
+                            vec![chat_id],
+                        )
+                        .await;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn manual_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        camera_id: Option<CameraId>,
+    ) -> anyhow::Result<()> {
+        info!("command Detect - chat_id:{chat_id} camera_id:{camera_id:?}");
+
+        if let Some(camera_id) = camera_id {
+            self.detect_of_camera_id(chat_id, camera_id).await;
+        } else {
+            let cameras = self.repository.get_sorted_cameras().await;
+            if cameras.is_empty() {
+                self.notifier
+                    .send_text_message("No available cameras".to_string(), vec![chat_id])
+                    .await;
+                return Ok(());
+            }
+            for camera in cameras {
+                self.detect_of_camera_id(chat_id, camera.id).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn config_manual_detection_cmd(
+        &self,
+        chat_id: ChatId,
+        enable: bool,
+        interval_seconds: Option<u64>,
+        types: Option<Vec<ObjectClass>>,
+    ) -> anyhow::Result<()> {
+        info!(
+            "command ConfigManualDetection - chat_id:{chat_id} enable:{enable} interval:{interval_seconds:?} types:{types:?}"
+        );
+
+        self.repository
+            .config_manual_detection(enable, interval_seconds, types, chat_id)
+            .await;
+
+        let config = self.repository.get_config().await;
+        if enable {
+            let types_str = if config.manual_detection.types.is_empty() {
+                if config.detector.types.is_empty() {
+                    "all configured objects".to_string()
+                } else {
+                    object_classes_to_string(&config.detector.types)
+                }
+            } else {
+                object_classes_to_string(&config.manual_detection.types)
+            };
+
+            self.send_success(
+                &format!(
+                    "Manual background detection ENABLED (every {}s, watching: {})",
+                    config.manual_detection.interval_seconds, types_str
+                ),
+                chat_id,
+            )
+            .await;
+        } else {
+            self.send_success("Manual background detection DISABLED", chat_id)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn get_manual_detection_status_cmd(&self, chat_id: ChatId) -> anyhow::Result<()> {
+        let config = self.repository.get_config().await;
+        let status_str = if config.manual_detection.enable {
+            "ENABLED ✅"
+        } else {
+            "DISABLED ❌"
+        };
+        let types_str = if config.manual_detection.types.is_empty() {
+            if config.detector.types.is_empty() {
+                "(defaults to all/detector types)".to_string()
+            } else {
+                format!(
+                    "{} (inherited from detector)",
+                    object_classes_to_string(&config.detector.types)
+                )
+            }
+        } else {
+            object_classes_to_string(&config.manual_detection.types)
+        };
+
+        let msg = format!(
+            "🔍 MANUAL BACKGROUND DETECTION STATUS\n• Status: {}\n• Interval: {} seconds\n• Target objects: {}\n\nUsage:\n/manualdetection enable 30s person car dog\n/manualdetection disable",
+            status_str, config.manual_detection.interval_seconds, types_str
+        );
+        self.notifier.send_text_message(msg, vec![chat_id]).await;
+        Ok(())
     }
 }
 

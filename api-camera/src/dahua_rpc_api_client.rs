@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use app_core::domain::camera::Recording;
+use app_core::domain::camera::{Recording, RecordingSummary};
 use app_core::traits::api_camera_client::ApiCameraClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDateTime, TimeZone, Utc};
@@ -89,6 +89,45 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         }
 
         Ok(recordings)
+    }
+
+    async fn get_recording_summary(
+        &self,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<RecordingSummary> {
+        let end = end_time.unwrap_or_else(Utc::now);
+        let start = start_time.unwrap_or_else(|| end - Duration::days(30));
+
+        let mut client = self.connect_and_login().await?;
+        let result = client
+            .find_recordings(0, DateTime::from(start), DateTime::from(end))
+            .await;
+        client.logout().await.ok();
+
+        let recordings = result?;
+        let total_files = recordings.len();
+        let total_size_mb: f64 = recordings
+            .iter()
+            .map(|r| r.length_bytes as f64 / 1024.0 / 1024.0)
+            .sum();
+        let first_begin = recordings.first().map(|r| r.start_time.clone());
+        let last_end = recordings.last().map(|r| r.end_time.clone());
+
+        Ok(RecordingSummary {
+            total_files,
+            total_size_mb,
+            first_begin,
+            last_end,
+        })
+    }
+
+    async fn get_recording_list(
+        &self,
+        time: DateTime<Utc>,
+        clip_time: chrono::Duration,
+    ) -> anyhow::Result<Vec<Recording>> {
+        self.get_recordings(time, clip_time).await
     }
 
     async fn download_recording(
@@ -317,11 +356,11 @@ impl DahuaClient {
         start: DateTime<Local>,
         end: DateTime<Local>,
     ) -> Result<Vec<DahuaRecording>> {
-        // checked against Dahua IPC-HFW2320R-ZS
-        let condition = json!({
+        // checked against Dahua IPC-HFW2320R-ZS and newer Dahua cameras
+        let mut condition = json!({
             "Channel": channel,
             "Dirs": [DEFAULT_DAHUA_SD_DIR],
-            "Types": ["dav"],
+            "Types": ["dav", "mp4"],
             "Order": "Ascent",
             "Redundant": "Exclusion",
             "Events": null,
@@ -330,13 +369,33 @@ impl DahuaClient {
             "EndTime": end.format("%Y-%m-%d %H:%M:%S").to_string(),
         });
 
-        let find = self
+        let mut find_res = self
             .call_on_object(
                 "mediaFileFind.findFile",
-                json!({ "condition": condition }),
+                json!({ "condition": condition.clone() }),
                 Some(object_id),
             )
-            .await?;
+            .await;
+
+        if find_res.is_err()
+            || find_res
+                .as_ref()
+                .map(|f| f.get("result") != Some(&Value::Bool(true)))
+                .unwrap_or(true)
+        {
+            // Fallback specifying /mnt/sd in case older firmware requires it
+            condition["Dirs"] = json!([DEFAULT_DAHUA_SD_DIR]);
+            condition["Types"] = json!(["dav"]);
+            find_res = self
+                .call_on_object(
+                    "mediaFileFind.findFile",
+                    json!({ "condition": condition }),
+                    Some(object_id),
+                )
+                .await;
+        }
+
+        let find = find_res?;
         if find.get("result") != Some(&Value::Bool(true)) {
             bail!("error in findFile: {find}");
         }
@@ -518,9 +577,15 @@ pub fn get_chosen_recording(
         })
         .collect();
 
+    // Prefer recordings where event_time matches the exact start time or falls inside [begin, end)
     parsed
         .iter()
-        .find(|(_, begin, end)| *begin <= event_time && event_time <= *end)
+        .find(|(_, begin, end)| *begin <= event_time && event_time < *end)
+        .or_else(|| {
+            parsed
+                .iter()
+                .find(|(_, begin, end)| *begin <= event_time && event_time <= *end)
+        })
         .or_else(|| {
             parsed
                 .iter()

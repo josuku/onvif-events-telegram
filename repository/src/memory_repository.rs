@@ -394,6 +394,24 @@ impl MemoryRepository {
         self.repo_store.update_config(chat_id, &config);
     }
 
+    pub async fn config_manual_detection(
+        &self,
+        enable: bool,
+        interval: Option<u64>,
+        types: Option<Vec<ObjectClass>>,
+        chat_id: ChatId,
+    ) {
+        let mut config = self.config.lock().await;
+        config.manual_detection.enable = enable;
+        if let Some(int) = interval {
+            config.manual_detection.interval_seconds = int;
+        }
+        if let Some(t) = types {
+            config.manual_detection.types = t;
+        }
+        self.repo_store.update_config(chat_id, &config);
+    }
+
     pub async fn get_detector_types(&self) -> Vec<ObjectClass> {
         let default_config = self.default_config.lock().await;
         default_config.detector.types.clone()
