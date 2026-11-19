@@ -22,3 +22,40 @@ Service is made using onvif-rs and a modified version of rustygram crate to perm
    $ git submodule update --init --recursive
    $ cargo run config.yaml
 ```
+
+## Yolo object detection prerequisites
+
+Ultralytics detector needs onnx runtime libs to work. Runtime needed files (1.28.0) are loaded from runtime folder on build stage (onvif-events-telegram/build.rs) and downloaded from:
+https://github.com/microsoft/onnxruntime/releases
+
+### Yolo model manual download and conversion to onnx
+
+```console
+   $ pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu12  # maybe not required
+   $ pip install -U ultralytic
+   $ yolo predict model=yolo11n.pt source=https://ultralytics.com/images/bus.jpg       # download model
+   $ yolo export model=yolo11n.pt format=onnx
+```
+
+## Recordings download
+
+FFMPEG is needed to decode original videos in mobile compatible formats.
+
+For Windows you can install with:
+```console
+winget search ffmpeg
+winget install BtbN.FFmpeg.LGPL
+```
+
+Or copy ffmpeg.exe in the same directory of the bot .exe file
+
+TODOs
+- [ ] fix. isapi recording list dont get all available recordings, and first is the first one in the camera, although you request another period
+- [ ] fix. Telegram has a 50mb limit do download files. Change limit from 600seconds to 50mb, and if a file is higher than this limit, split in several video files
+- [ ] get available onvif services
+- [ ] add oxvif implementation for onvif camera client
+- [ ] add ort implementation for object detection
+- [ ] reboot camera command (maybe indicate if polling has errors)
+- [ ] add getvideo command indicating camera and number or seconds or minutes
+- [ ] save detections in postgres and pictures in a folder (in future must have a cleanup process)
+- [ ] make a frontend to be able to check pictures with data, and search by date, camera or object

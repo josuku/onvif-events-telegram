@@ -1,0 +1,26 @@
+use crate::domain::camera::{CameraConnectionData, DeviceInfo, OnvifCameraEvent};
+use async_trait::async_trait;
+
+pub type ChannelLabel = String;
+pub type RtspUri = String;
+
+#[async_trait]
+pub trait OnvifCameraClient: Send + Sync {
+    async fn get_snapshot_uri(&self) -> anyhow::Result<String>;
+    async fn get_rtsp_uri(&self) -> anyhow::Result<RtspUri>;
+    async fn get_rtsp_channels(&self) -> anyhow::Result<Vec<(ChannelLabel, RtspUri)>>;
+    async fn snapshot(&self) -> anyhow::Result<Vec<u8>>;
+    async fn snapshot_via_rtsp(&self) -> anyhow::Result<Vec<u8>>;
+    async fn snapshot_via_rtsp_uri(&self, rtsp_uri: &str) -> anyhow::Result<Vec<u8>>;
+    async fn get_event_message(&self) -> anyhow::Result<Option<OnvifCameraEvent>>;
+    fn connected(&self) -> bool;
+    fn get_connection_data(&self) -> CameraConnectionData;
+    async fn create_user_and_fix_snapshot_uri(
+        &self,
+        camera_uri: &str,
+        orig_snapshot_uri: &str,
+    ) -> anyhow::Result<String>;
+    async fn unsubscribe(&self);
+    async fn renew_subscription(&self, termination_time: &str);
+    async fn get_device_info(&self) -> anyhow::Result<DeviceInfo>;
+}

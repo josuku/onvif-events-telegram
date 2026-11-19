@@ -1,0 +1,7 @@
+.devcontainer/
+.vscode/
+logs/
+target/
+.dockerignore
+.gitignore
+*db
