@@ -33,6 +33,7 @@ pub enum BotCommand {
     SetCredentials(String),
     FixSnapshot(CameraId),
     SetZoom(String),
+    Reboot(CameraId),
     // Events
     Subscribe(CameraId),
     Unsubscribe(CameraId),
@@ -444,6 +445,10 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
+        BotCommand::Reboot(camera_id) => command_processor
+            .reboot_camera_cmd(chat_id, camera_id)
+            .await
+            .map_err(anyhow_to_response_error)?,
         BotCommand::Detect(camera_id) => {
             let camera_id = camera_id.trim();
             let camera_id = if camera_id.is_empty() || camera_id.eq_ignore_ascii_case("all") {
@@ -762,6 +767,7 @@ fn help_text() -> String {
 /setcredentials `camera_id username password` \\- update credentials
 /setzoom `camera_id zoom`, \\- zoom camera \\(range 1\\-100\\)
 /fixsnapshot `camera_id` \\- fix or resolve snapshot URI
+/reboot `camera_id` \\- reboot camera
 
 🔔 *EVENTS*
 /subscribe `camera_id` \\- subscribe to camera notifications

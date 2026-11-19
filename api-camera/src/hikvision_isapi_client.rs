@@ -337,6 +337,52 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
     async fn set_optical_zoom(&self, _zoom: u8) -> anyhow::Result<()> {
         anyhow::bail!("not implemented");
     }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let url = format!("{}/ISAPI/System/reboot", self.base_url());
+        let resp = self
+            .http
+            .put(&url)
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .with_context(|| format!("failed to send reboot request to {url}"))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            bail!("ISAPI reboot failed with HTTP {status}: {body}");
+        }
+
+        if let Ok(response_status) = quick_xml::de::from_str::<ResponseStatus>(&body)
+            && response_status.status_code != 1
+            && !response_status.status_string.eq_ignore_ascii_case("ok")
+        {
+            bail!(
+                "ISAPI reboot returned non-ok status: code={}, string={}, sub={}",
+                response_status.status_code,
+                response_status.status_string,
+                response_status.sub_status_code
+            );
+        }
+
+        tracing::info!("Hikvision camera reboot command issued successfully");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "ResponseStatus")]
+struct ResponseStatus {
+    #[serde(rename = "requestURL", default)]
+    _request_url: Option<String>,
+    #[serde(rename = "statusCode", default)]
+    status_code: i32,
+    #[serde(rename = "statusString", default)]
+    status_string: String,
+    #[serde(rename = "subStatusCode", default)]
+    sub_status_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -592,5 +638,20 @@ mod tests {
         let parsed: CmSearchResult = quick_xml::de::from_str(xml).expect("must parse XML");
         assert_eq!(parsed.response_status_strg.as_deref(), Some("MORE"));
         assert_eq!(parsed.match_list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_response_status() {
+        let xml = r#"<ResponseStatus xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">
+<requestURL>/ISAPI/System/reboot</requestURL>
+<statusCode>1</statusCode>
+<statusString>OK</statusString>
+<subStatusCode>ok</subStatusCode>
+</ResponseStatus>"#;
+
+        let parsed: ResponseStatus = quick_xml::de::from_str(xml).expect("must parse XML");
+        assert_eq!(parsed.status_code, 1);
+        assert_eq!(parsed.status_string, "OK");
+        assert_eq!(parsed.sub_status_code, "ok");
     }
 }

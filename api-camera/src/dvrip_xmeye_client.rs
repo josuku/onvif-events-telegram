@@ -6,7 +6,7 @@ use app_core::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
-use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
+use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement, SystemInfo};
 
 use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval};
 
@@ -299,6 +299,30 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
 
     async fn set_optical_zoom(&self, _zoom: u8) -> anyhow::Result<()> {
         anyhow::bail!("not implemented");
+    }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let mut cam = self.connect_and_login().await?;
+        tracing::info!("reboot -> connected to XMeye/DVRIP camera");
+        let result = cam.reboot().await;
+        tracing::info!("reboot -> DVRIP result: {result:?}");
+
+        match result {
+            Ok(true) => {
+                // Xmeye cameras take 5-10s to reboo, wait not to cancel reboot
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                cam.close().await.ok();
+                Ok(())
+            }
+            Ok(false) => {
+                cam.close().await.ok();
+                anyhow::bail!("DVRIP reboot command returned false/failed");
+            }
+            Err(e) => {
+                cam.close().await.ok();
+                anyhow::bail!("DVRIP reboot failed: {e}");
+            }
+        }
     }
 }
 

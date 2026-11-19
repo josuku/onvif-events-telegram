@@ -996,6 +996,50 @@ CURRENT CONFIG
         anyhow::bail!("no api camera client available")
     }
 
+    async fn reboot_camera_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()> {
+        let (camera_data, api_camera_client) = match self.get_api_camera_client(camera_id, chat_id).await {
+            Some(res) => res,
+            None => anyhow::bail!("camera or api client not available"),
+        };
+
+        let camera_uri = camera_data.onvif_client.get_connection_data().uri;
+        let camera_name = camera_data.name.clone();
+
+        info!("rebooting camera {} ({})", camera_id, camera_name);
+
+        if let Err(err) = api_camera_client.reboot().await {
+            let error = format!("failed to issue reboot command to camera {camera_id}");
+            self.send_error(&error, chat_id).await;
+            anyhow::bail!("{}. {}", error, err);
+        }
+
+        // pool connection to verify reboot
+        let check_duration = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        let mut reboot_detected = false;
+
+        while start.elapsed() < check_duration {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if !is_reachable(&camera_uri).await {
+                reboot_detected = true;
+                break;
+            }
+        }
+
+        if reboot_detected {
+            let msg = format!("Camera {camera_id} ({camera_name}) rebooted successfully ");
+            self.send_success(&msg, chat_id).await;
+            Ok(())
+        } else {
+            let error = format!(
+                "Camera {camera_id} ({camera_name}) still responding to network after {}s; reboot might have failed or not taken effect.",
+                check_duration.as_secs()
+            );
+            self.send_error(&error, chat_id).await;
+            anyhow::bail!(error);
+        }
+    }
+
     async fn get_recording_summary_cmd(
         &self,
         chat_id: ChatId,

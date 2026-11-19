@@ -196,6 +196,14 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         client.logout().await.ok();
         result
     }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let mut client = self.connect_and_login().await?;
+        tracing::info!("reboot -> connected to Dahua camera");
+        let result = client.reboot().await;
+        client.logout().await.ok();
+        result
+    }
 }
 
 struct DahuaClient {
@@ -492,6 +500,12 @@ impl DahuaClient {
             .ok();
 
         result.map(|_| ())
+    }
+
+    pub async fn reboot(&mut self) -> Result<()> {
+        let resp = self.call("magicBox.reboot", json!(null)).await?;
+        tracing::info!("magicBox.reboot response: {resp}");
+        Ok(())
     }
 
     fn next_request_id(&mut self) -> u32 {
