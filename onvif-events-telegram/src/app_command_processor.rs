@@ -225,13 +225,7 @@ impl AppCommandProcessor {
             };
 
             let _ = notifier
-                .send_picture_message(
-                    &caption,
-                    snapshot,
-                    chat_id,
-                    camera_id,
-                    &chrono::Utc::now(),
-                )
+                .send_picture_message(&caption, snapshot, chat_id, camera_id, &chrono::Utc::now())
                 .await;
         });
     }
@@ -1112,7 +1106,7 @@ CURRENT CONFIG
 
         let total_items = recordings.len();
         let page_size = 10;
-        let total_pages = (total_items + page_size - 1) / page_size;
+        let total_pages = total_items.div_ceil(page_size);
         let current_page = page.max(1).min(total_pages);
         let start_index = (current_page - 1) * page_size;
         let end_index = (start_index + page_size).min(total_items);
@@ -1142,11 +1136,7 @@ CURRENT CONFIG
 
             lines.push(format!(
                 "{}. `{}`\n- From: {}\n- To: {}\n- Size: {}\n",
-                item_num,
-                r.name,
-                r.begin,
-                r.end,
-                size_text,
+                item_num, r.name, r.begin, r.end, size_text,
             ));
 
             // Try to get rfc3339 timestamp from r.begin.
@@ -1286,14 +1276,16 @@ CURRENT CONFIG
             let recordings = match api_client.get_recordings(date, clip).await {
                 Ok(rec) => rec,
                 Err(err) => {
-                    let err_msg = format!("❌ Error getting recordings for camera {camera_id}: {err}");
+                    let err_msg =
+                        format!("❌ Error getting recordings for camera {camera_id}: {err}");
                     notifier.send_text_message(err_msg, vec![chat_id]).await;
                     return;
                 }
             };
 
             if recordings.is_empty() {
-                let msg = format!("❌ No recordings found for camera {camera_id} at requested date");
+                let msg =
+                    format!("❌ No recordings found for camera {camera_id} at requested date");
                 notifier.send_text_message(msg, vec![chat_id]).await;
                 return;
             }

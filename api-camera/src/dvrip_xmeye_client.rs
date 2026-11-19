@@ -157,8 +157,7 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
                 .get("FileLength")
                 .and_then(|s| s.as_str())
                 .unwrap_or("0");
-            let size =
-                u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
+            let size = u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
             // FileLength in DVRIP is in KB, so dividing by 1024 gives MB.
             total_size_mb += size as f64 / 1024.0;
 
@@ -356,11 +355,12 @@ impl DvrIpXmeyeApiCameraClient {
             })
             .copied();
 
-        let segments_to_download: Vec<(NaiveDateTime, NaiveDateTime)> = if let Some(target) = target_segment {
-            vec![target]
-        } else {
-            sorted_segments
-        };
+        let segments_to_download: Vec<(NaiveDateTime, NaiveDateTime)> =
+            if let Some(target) = target_segment {
+                vec![target]
+            } else {
+                sorted_segments
+            };
 
         for (idx, (seg_begin, seg_end)) in segments_to_download.into_iter().enumerate() {
             let clamp_begin = seg_begin.max(want_begin);

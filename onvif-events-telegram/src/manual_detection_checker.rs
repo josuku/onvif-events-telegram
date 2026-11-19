@@ -135,4 +135,3 @@ async fn check_manual_detection_in_cameras(
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }
 }
-

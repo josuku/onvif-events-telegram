@@ -1,5 +1,5 @@
 use crate::domain::object::ObjectClass;
-use serde::{Deserialize};
+use serde::Deserialize;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
