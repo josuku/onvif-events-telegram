@@ -6,9 +6,9 @@ use app_core::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
-use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement};
+use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement, SystemInfo};
 
-use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval};
+use crate::{MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval, get_clip_interval_clamped};
 
 // Implementation for XMEye-icSEE compatible chinese cameras. DvrIp is the protocol they use
 
@@ -157,8 +157,7 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
                 .get("FileLength")
                 .and_then(|s| s.as_str())
                 .unwrap_or("0");
-            let size =
-                u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
+            let size = u64::from_str_radix(size_str.trim_start_matches("0x"), 16).unwrap_or(0);
             // FileLength in DVRIP is in KB, so dividing by 1024 gives MB.
             total_size_mb += size as f64 / 1024.0;
 
@@ -255,13 +254,7 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
             anyhow::bail!("no recordings to download");
         }
 
-        let (start_time, end_time) = get_clip_interval(event_time, clip_time);
-
-        if (end_time - start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-            anyhow::bail!(
-                "Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way"
-            );
-        }
+        let (start_time, end_time) = get_clip_interval_clamped(event_time, clip_time);
 
         let target_name_with_extension = self
             .download_window(recordings, event_time, start_time, end_time, &target_name)
@@ -300,6 +293,30 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
 
     async fn set_optical_zoom(&self, _zoom: u8) -> anyhow::Result<()> {
         anyhow::bail!("not implemented");
+    }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let mut cam = self.connect_and_login().await?;
+        tracing::info!("reboot -> connected to XMeye/DVRIP camera");
+        let result = cam.reboot().await;
+        tracing::info!("reboot -> DVRIP result: {result:?}");
+
+        match result {
+            Ok(true) => {
+                // Xmeye cameras take 5-10s to reboo, wait not to cancel reboot
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                cam.close().await.ok();
+                Ok(())
+            }
+            Ok(false) => {
+                cam.close().await.ok();
+                anyhow::bail!("DVRIP reboot command returned false/failed");
+            }
+            Err(e) => {
+                cam.close().await.ok();
+                anyhow::bail!("DVRIP reboot failed: {e}");
+            }
+        }
     }
 }
 
@@ -356,11 +373,12 @@ impl DvrIpXmeyeApiCameraClient {
             })
             .copied();
 
-        let segments_to_download: Vec<(NaiveDateTime, NaiveDateTime)> = if let Some(target) = target_segment {
-            vec![target]
-        } else {
-            sorted_segments
-        };
+        let segments_to_download: Vec<(NaiveDateTime, NaiveDateTime)> =
+            if let Some(target) = target_segment {
+                vec![target]
+            } else {
+                sorted_segments
+            };
 
         for (idx, (seg_begin, seg_end)) in segments_to_download.into_iter().enumerate() {
             let clamp_begin = seg_begin.max(want_begin);

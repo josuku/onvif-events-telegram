@@ -90,6 +90,7 @@ pub trait CommandProcessor: Send + Sync {
         camera_id: CameraId,
         zoom_level: u8,
     ) -> anyhow::Result<()>;
+    async fn reboot_camera_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()>;
     async fn get_recording_summary_cmd(
         &self,
         chat_id: ChatId,

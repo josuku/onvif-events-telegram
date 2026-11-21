@@ -225,13 +225,7 @@ impl AppCommandProcessor {
             };
 
             let _ = notifier
-                .send_picture_message(
-                    &caption,
-                    snapshot,
-                    chat_id,
-                    camera_id,
-                    &chrono::Utc::now(),
-                )
+                .send_picture_message(&caption, snapshot, chat_id, camera_id, &chrono::Utc::now())
                 .await;
         });
     }
@@ -924,19 +918,52 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    match self
-                        .notifier
-                        .send_video_message(&file_path, chat_id, Some(message_id))
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::info!("deleting file {file_path:?} after send");
-                            tokio::fs::remove_file(&file_path).await.ok();
-                        }
+                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
+                        Ok(p) => p,
                         Err(err) => {
-                            tracing::error!("cannot send video message. {}", err);
-                            return Err(DownloadRecordingError::ErrorSendingVideo);
+                            tracing::warn!("split failed, sending original: {err}");
+                            vec![std::path::PathBuf::from(&file_path)]
                         }
+                    };
+                    let total_parts = parts.len();
+                    for (i, part_path) in parts.iter().enumerate() {
+                        let part_str = part_path.to_string_lossy().to_string();
+                        let label = if total_parts > 1 {
+                            format!("📹 Part {}/{}", i + 1, total_parts)
+                        } else {
+                            String::new()
+                        };
+                        if !label.is_empty() {
+                            self.notifier
+                                .send_text_message(label, vec![chat_id])
+                                .await;
+                        }
+                        match self
+                            .notifier
+                            .send_video_message(&part_str, chat_id, Some(message_id))
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::info!("deleting file {part_str:?} after send");
+                                tokio::fs::remove_file(&part_str).await.ok();
+                            }
+                            Err(err) => {
+                                tracing::error!("cannot send video message. {}", err);
+                                // cleanup remaining parts
+                                for remaining in &parts[i..] {
+                                    tokio::fs::remove_file(remaining).await.ok();
+                                }
+                                // cleanup original if different from parts
+                                if total_parts > 1 {
+                                    tokio::fs::remove_file(&file_path).await.ok();
+                                }
+                                return Err(DownloadRecordingError::ErrorSendingVideo);
+                            }
+                        }
+                    }
+                    // cleanup original file if it was split into parts
+                    if total_parts > 1 {
+                        tokio::fs::remove_file(&file_path).await.ok();
                     }
                     return Ok(());
                 }
@@ -1000,6 +1027,50 @@ CURRENT CONFIG
         }
 
         anyhow::bail!("no api camera client available")
+    }
+
+    async fn reboot_camera_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()> {
+        let (camera_data, api_camera_client) = match self.get_api_camera_client(camera_id, chat_id).await {
+            Some(res) => res,
+            None => anyhow::bail!("camera or api client not available"),
+        };
+
+        let camera_uri = camera_data.onvif_client.get_connection_data().uri;
+        let camera_name = camera_data.name.clone();
+
+        info!("rebooting camera {} ({})", camera_id, camera_name);
+
+        if let Err(err) = api_camera_client.reboot().await {
+            let error = format!("failed to issue reboot command to camera {camera_id}");
+            self.send_error(&error, chat_id).await;
+            anyhow::bail!("{}. {}", error, err);
+        }
+
+        // pool connection to verify reboot
+        let check_duration = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        let mut reboot_detected = false;
+
+        while start.elapsed() < check_duration {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if !is_reachable(&camera_uri).await {
+                reboot_detected = true;
+                break;
+            }
+        }
+
+        if reboot_detected {
+            let msg = format!("Camera {camera_id} ({camera_name}) rebooted successfully ");
+            self.send_success(&msg, chat_id).await;
+            Ok(())
+        } else {
+            let error = format!(
+                "Camera {camera_id} ({camera_name}) still responding to network after {}s; reboot might have failed or not taken effect.",
+                check_duration.as_secs()
+            );
+            self.send_error(&error, chat_id).await;
+            anyhow::bail!(error);
+        }
     }
 
     async fn get_recording_summary_cmd(
@@ -1112,7 +1183,7 @@ CURRENT CONFIG
 
         let total_items = recordings.len();
         let page_size = 10;
-        let total_pages = (total_items + page_size - 1) / page_size;
+        let total_pages = total_items.div_ceil(page_size);
         let current_page = page.max(1).min(total_pages);
         let start_index = (current_page - 1) * page_size;
         let end_index = (start_index + page_size).min(total_items);
@@ -1142,11 +1213,7 @@ CURRENT CONFIG
 
             lines.push(format!(
                 "{}. `{}`\n- From: {}\n- To: {}\n- Size: {}\n",
-                item_num,
-                r.name,
-                r.begin,
-                r.end,
-                size_text,
+                item_num, r.name, r.begin, r.end, size_text,
             ));
 
             // Try to get rfc3339 timestamp from r.begin.
@@ -1286,14 +1353,16 @@ CURRENT CONFIG
             let recordings = match api_client.get_recordings(date, clip).await {
                 Ok(rec) => rec,
                 Err(err) => {
-                    let err_msg = format!("❌ Error getting recordings for camera {camera_id}: {err}");
+                    let err_msg =
+                        format!("❌ Error getting recordings for camera {camera_id}: {err}");
                     notifier.send_text_message(err_msg, vec![chat_id]).await;
                     return;
                 }
             };
 
             if recordings.is_empty() {
-                let msg = format!("❌ No recordings found for camera {camera_id} at requested date");
+                let msg =
+                    format!("❌ No recordings found for camera {camera_id} at requested date");
                 notifier.send_text_message(msg, vec![chat_id]).await;
                 return;
             }
@@ -1310,20 +1379,47 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    match notifier.send_video_message(&file_path, chat_id, None).await {
-                        Ok(_) => {
-                            tracing::info!("deleting file {file_path:?} after send");
-                            tokio::fs::remove_file(&file_path).await.ok();
-                        }
+                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
+                        Ok(p) => p,
                         Err(err) => {
-                            tracing::error!("cannot send video message: {err}");
+                            tracing::warn!("split failed, sending original: {err}");
+                            vec![std::path::PathBuf::from(&file_path)]
+                        }
+                    };
+                    let total_parts = parts.len();
+                    for (i, part_path) in parts.iter().enumerate() {
+                        let part_str = part_path.to_string_lossy().to_string();
+                        if total_parts > 1 {
                             notifier
                                 .send_text_message(
-                                    format!("❌ Error sending video: {err}"),
+                                    format!("📹 Part {}/{}", i + 1, total_parts),
                                     vec![chat_id],
                                 )
                                 .await;
                         }
+                        match notifier.send_video_message(&part_str, chat_id, None).await {
+                            Ok(_) => {
+                                tracing::info!("deleting file {part_str:?} after send");
+                                tokio::fs::remove_file(&part_str).await.ok();
+                            }
+                            Err(err) => {
+                                tracing::error!("cannot send video message: {err}");
+                                notifier
+                                    .send_text_message(
+                                        format!("❌ Error sending video part {}: {err}", i + 1),
+                                        vec![chat_id],
+                                    )
+                                    .await;
+                                // cleanup remaining
+                                for remaining in &parts[i..] {
+                                    tokio::fs::remove_file(remaining).await.ok();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if total_parts > 1 {
+                        tokio::fs::remove_file(&file_path).await.ok();
                     }
                 }
                 Err(err) => {

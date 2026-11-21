@@ -8,8 +8,8 @@ pub mod dvrip_xmeye_client;
 pub mod hikvision_isapi_client;
 
 const MAX_FILES: usize = 5;
-const MAX_DOWNLOAD_SECONDS: i64 = 600; // 10 minutes
-const _MAX_FILE_SIZE_MB: i64 = 50; // Telegram bot limits
+pub const MAX_DOWNLOAD_SECONDS: i64 = 600; // 10 minutes
+pub const MAX_FILE_SIZE_BYTES: u64 = 49 * 1024 * 1024; // 49 MB to be safely within Telegram's 50 MB limit
 
 pub fn get_clip_interval(
     time: DateTime<Utc>,
@@ -19,6 +19,21 @@ pub fn get_clip_interval(
     let mut end_time = time + clip_time;
     if end_time > Utc::now() {
         end_time = Utc::now();
+    }
+    (start_time, end_time)
+}
+
+pub fn get_clip_interval_clamped(
+    time: DateTime<Utc>,
+    clip_time: Duration,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let (start_time, mut end_time) = get_clip_interval(time, clip_time);
+    let total_secs = (end_time - start_time).num_seconds();
+    if total_secs > MAX_DOWNLOAD_SECONDS {
+        end_time = start_time + Duration::seconds(MAX_DOWNLOAD_SECONDS);
+        if end_time > Utc::now() {
+            end_time = Utc::now();
+        }
     }
     (start_time, end_time)
 }
@@ -124,4 +139,120 @@ pub async fn ffmpeg_trim_and_convert(
 
     let fallback_args_ref: Vec<&str> = fallback_args.iter().map(String::as_str).collect();
     run_ffmpeg(&fallback_args_ref).await
+}
+
+pub async fn get_video_duration(video_path: &Path) -> anyhow::Result<f64> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_path.to_str().unwrap_or_default(),
+        ])
+        .output()
+        .await
+        .context("cannot execute ffprobe")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let out_str = String::from_utf8_lossy(&output.stdout);
+    let dur = out_str.trim().parse::<f64>().context("failed to parse video duration from ffprobe")?;
+    Ok(dur)
+}
+
+pub async fn split_video_if_needed(video_path: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let metadata = tokio::fs::metadata(video_path)
+        .await
+        .with_context(|| format!("cannot get metadata for {video_path:?}"))?;
+    let file_size = metadata.len();
+
+    if file_size <= MAX_FILE_SIZE_BYTES {
+        return Ok(vec![video_path.to_path_buf()]);
+    }
+
+    let duration_secs = match get_video_duration(video_path).await {
+        Ok(d) if d > 1.0 => d,
+        Ok(_) => anyhow::bail!("video duration is too short to split"),
+        Err(e) => {
+            tracing::warn!("could not probe duration for splitting: {e}");
+            anyhow::bail!("cannot probe video duration for splitting: {e}");
+        }
+    };
+
+    let num_parts = (file_size as f64 / MAX_FILE_SIZE_BYTES as f64).ceil() as u32 + 1;
+    let num_parts = num_parts.max(2);
+    let segment_time = (duration_secs / num_parts as f64).floor().max(1.0);
+
+    let parent_dir = video_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = video_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("video");
+    let ext = video_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mp4");
+
+    let segment_pattern = parent_dir
+        .join(format!("{stem}_part%03d.{ext}"))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let segment_time_str = format!("{segment_time:.2}");
+
+    tracing::info!(
+        "Splitting video {video_path:?} ({file_size} bytes, {duration_secs:.1}s) into {num_parts} parts (segment_time: {segment_time_str}s)"
+    );
+
+    let split_args = [
+        "-i",
+        video_path.to_str().unwrap(),
+        "-c",
+        "copy",
+        "-map",
+        "0",
+        "-f",
+        "segment",
+        "-segment_time",
+        &segment_time_str,
+        "-reset_timestamps",
+        "1",
+        "-segment_format_options",
+        "movflags=+faststart",
+        "-y",
+        &segment_pattern,
+    ];
+
+    run_ffmpeg(&split_args).await?;
+
+    // Collect created part files matching {stem}_part*.{ext}
+    let mut parts: Vec<std::path::PathBuf> = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(parent_dir).await?;
+    let prefix = format!("{stem}_part");
+    let extension = format!(".{ext}");
+
+    while let Some(entry) = read_dir.next_entry().await? {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(&prefix) && name_str.ends_with(&extension) {
+            parts.push(entry.path());
+        }
+    }
+
+    parts.sort();
+
+    if parts.is_empty() {
+        anyhow::bail!("ffmpeg segment completed but no split files were produced");
+    }
+
+    tracing::info!("Successfully split {video_path:?} into {} files: {parts:?}", parts.len());
+    Ok(parts)
 }

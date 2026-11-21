@@ -50,12 +50,9 @@ winget install BtbN.FFmpeg.LGPL
 Or copy ffmpeg.exe in the same directory of the bot .exe file
 
 TODOs
-- [ ] fix. isapi recording list dont get all available recordings, and first is the first one in the camera, although you request another period
-- [ ] fix. Telegram has a 50mb limit do download files. Change limit from 600seconds to 50mb, and if a file is higher than this limit, split in several video files
 - [ ] get available onvif services
 - [ ] add oxvif implementation for onvif camera client
 - [ ] add ort implementation for object detection
-- [ ] reboot camera command (maybe indicate if polling has errors)
 - [ ] add getvideo command indicating camera and number or seconds or minutes
 - [ ] save detections in postgres and pictures in a folder (in future must have a cleanup process)
 - [ ] make a frontend to be able to check pictures with data, and search by date, camera or object

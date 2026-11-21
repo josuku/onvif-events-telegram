@@ -10,11 +10,13 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use crate::{MAX_DOWNLOAD_SECONDS, ffmpeg_trim_and_convert, get_clip_interval};
+use crate::{ffmpeg_trim_and_convert, get_clip_interval, get_clip_interval_clamped};
 
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_TRACK_ID: u32 = 101;
+const ISAPI_SEARCH_PAGE_SIZE: u32 = 40;
+const MAX_SEARCH_PAGES: u32 = 100; // Safeguard limit to avoid infinite loops
 
 pub struct HikvisionIsapiApiCameraClient {
     host: String,
@@ -68,6 +70,66 @@ impl HikvisionIsapiApiCameraClient {
     fn base_url(&self) -> String {
         format!("http://{}", self.host)
     }
+
+    async fn search_all_matches(
+        &self,
+        query_start: DateTime<Utc>,
+        query_end: DateTime<Utc>,
+    ) -> Result<Vec<SearchMatchItem>> {
+        let search_id = uuid::Uuid::new_v4().to_string();
+        let mut position: u32 = 0;
+        let mut all_items: Vec<SearchMatchItem> = Vec::new();
+
+        for _ in 0..MAX_SEARCH_PAGES {
+            let body = build_search_body(
+                DEFAULT_TRACK_ID,
+                query_start,
+                query_end,
+                &search_id,
+                position,
+                ISAPI_SEARCH_PAGE_SIZE,
+            );
+
+            let resp = self
+                .http
+                .post(format!("{}/ISAPI/ContentMgmt/search", self.base_url()))
+                .basic_auth(&self.user, Some(&self.password))
+                .header("Content-Type", "application/xml")
+                .body(body)
+                .send()
+                .await
+                .context("Network error calling ISAPI search")?;
+
+            if !resp.status().is_success() {
+                bail!("ISAPI search failed (HTTP {})", resp.status());
+            }
+
+            let xml = resp
+                .text()
+                .await
+                .context("Cannot read ISAPI search response body")?;
+
+            let parsed: CmSearchResult =
+                quick_xml::de::from_str(&xml).context("Cannot parse ISAPI search XML")?;
+
+            let items_count = parsed.match_list.items.len();
+            let is_more = parsed
+                .response_status_strg
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("MORE"))
+                .unwrap_or(false);
+
+            all_items.extend(parsed.match_list.items);
+
+            if !is_more || items_count == 0 {
+                break;
+            }
+
+            position += items_count as u32;
+        }
+
+        Ok(all_items)
+    }
 }
 
 #[async_trait]
@@ -103,33 +165,9 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
             None => (start_time, end_time),
         };
 
-        let body = build_search_body(DEFAULT_TRACK_ID, query_start, query_end);
+        let items = self.search_all_matches(query_start, query_end).await?;
 
-        let resp = self
-            .http
-            .post(format!("{}/ISAPI/ContentMgmt/search", self.base_url()))
-            .basic_auth(&self.user, Some(&self.password))
-            .header("Content-Type", "application/xml")
-            .body(body)
-            .send()
-            .await
-            .context("Network error calling ISAPI search")?;
-
-        if !resp.status().is_success() {
-            bail!("ISAPI search failed (HTTP {})", resp.status());
-        }
-
-        let xml = resp
-            .text()
-            .await
-            .context("Cannot read ISAPI search response body")?;
-
-        let parsed: CmSearchResult =
-            quick_xml::de::from_str(&xml).context("Cannot parse ISAPI search XML")?;
-
-        let recordings = parsed
-            .match_list
-            .items
+        let recordings = items
             .into_iter()
             .map(|item| {
                 let size_mb = extract_query_param(&item.descriptor.playback_uri, "size")
@@ -182,34 +220,10 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
             None => (start, end),
         };
 
-        let body = build_search_body(DEFAULT_TRACK_ID, query_start, query_end);
+        let items = self.search_all_matches(query_start, query_end).await?;
 
-        let resp = self
-            .http
-            .post(format!("{}/ISAPI/ContentMgmt/search", self.base_url()))
-            .basic_auth(&self.user, Some(&self.password))
-            .header("Content-Type", "application/xml")
-            .body(body)
-            .send()
-            .await
-            .context("Network error calling ISAPI search")?;
-
-        if !resp.status().is_success() {
-            bail!("ISAPI search failed (HTTP {})", resp.status());
-        }
-
-        let xml = resp
-            .text()
-            .await
-            .context("Cannot read ISAPI search response body")?;
-
-        let parsed: CmSearchResult =
-            quick_xml::de::from_str(&xml).context("Cannot parse ISAPI search XML")?;
-
-        let total_files = parsed.match_list.items.len();
-        let total_size_mb: f64 = parsed
-            .match_list
-            .items
+        let total_files = items.len();
+        let total_size_mb: f64 = items
             .iter()
             .map(|item| {
                 extract_query_param(&item.descriptor.playback_uri, "size")
@@ -219,20 +233,16 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
             })
             .sum();
 
-        let first_begin = parsed.match_list.items.first().map(|item| {
-            match local_offset {
-                Some(offset) => correct_fake_utc(&item.time_span.start_time, offset)
-                    .unwrap_or_else(|_| item.time_span.start_time.clone()),
-                None => item.time_span.start_time.clone(),
-            }
+        let first_begin = items.first().map(|item| match local_offset {
+            Some(offset) => correct_fake_utc(&item.time_span.start_time, offset)
+                .unwrap_or_else(|_| item.time_span.start_time.clone()),
+            None => item.time_span.start_time.clone(),
         });
 
-        let last_end = parsed.match_list.items.last().map(|item| {
-            match local_offset {
-                Some(offset) => correct_fake_utc(&item.time_span.end_time, offset)
-                    .unwrap_or_else(|_| item.time_span.end_time.clone()),
-                None => item.time_span.end_time.clone(),
-            }
+        let last_end = items.last().map(|item| match local_offset {
+            Some(offset) => correct_fake_utc(&item.time_span.end_time, offset)
+                .unwrap_or_else(|_| item.time_span.end_time.clone()),
+            None => item.time_span.end_time.clone(),
         });
 
         Ok(RecordingSummary {
@@ -327,11 +337,61 @@ impl ApiCameraClient for HikvisionIsapiApiCameraClient {
     async fn set_optical_zoom(&self, _zoom: u8) -> anyhow::Result<()> {
         anyhow::bail!("not implemented");
     }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let url = format!("{}/ISAPI/System/reboot", self.base_url());
+        let resp = self
+            .http
+            .put(&url)
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .with_context(|| format!("failed to send reboot request to {url}"))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            bail!("ISAPI reboot failed with HTTP {status}: {body}");
+        }
+
+        if let Ok(response_status) = quick_xml::de::from_str::<ResponseStatus>(&body)
+            && response_status.status_code != 1
+            && !response_status.status_string.eq_ignore_ascii_case("ok")
+        {
+            bail!(
+                "ISAPI reboot returned non-ok status: code={}, string={}, sub={}",
+                response_status.status_code,
+                response_status.status_string,
+                response_status.sub_status_code
+            );
+        }
+
+        tracing::info!("Hikvision camera reboot command issued successfully");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "ResponseStatus")]
+struct ResponseStatus {
+    #[serde(rename = "requestURL", default)]
+    _request_url: Option<String>,
+    #[serde(rename = "statusCode", default)]
+    status_code: i32,
+    #[serde(rename = "statusString", default)]
+    status_string: String,
+    #[serde(rename = "subStatusCode", default)]
+    sub_status_code: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename = "CMSearchResult")]
 struct CmSearchResult {
+    #[serde(rename = "responseStatusStrg", default)]
+    response_status_strg: Option<String>,
+    #[serde(rename = "numOfMatches", default)]
+    _num_of_matches: Option<usize>,
     #[serde(rename = "matchList", default)]
     match_list: MatchList,
 }
@@ -364,8 +424,14 @@ struct MediaSegmentDescriptor {
     playback_uri: String,
 }
 
-fn build_search_body(track_id: u32, start: DateTime<Utc>, end: DateTime<Utc>) -> String {
-    let search_id = uuid::Uuid::new_v4();
+fn build_search_body(
+    track_id: u32,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    search_id: &str,
+    position: u32,
+    max_results: u32,
+) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <CMSearchDescription>
@@ -379,8 +445,8 @@ fn build_search_body(track_id: u32, start: DateTime<Utc>, end: DateTime<Utc>) ->
       <endTime>{}</endTime>
     </timeSpan>
   </timeSpanList>
-  <maxResults>40</maxResults>
-  <searchResultPostion>0</searchResultPostion>
+  <maxResults>{max_results}</maxResults>
+  <searchResultPostion>{position}</searchResultPostion>
   <metadataList>
     <metadataDescriptor>//metadata.psia.org/VideoMotion</metadataDescriptor>
   </metadataList>
@@ -456,19 +522,16 @@ fn compute_isapi_clip_window(
     time: DateTime<Utc>,
     clip_time: Duration,
 ) -> Result<(f64, f64)> {
-    let (clip_start_time, clip_end_time) = get_clip_interval(time, clip_time);
-    if (clip_end_time - clip_start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-        anyhow::bail!("Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way");
-    }
+    let (clamped_start, clamped_end) = get_clip_interval_clamped(time, clip_time);
 
     let recording_start =
         parse_isapi_time(&recording.begin).context("cannot parse recording begin time")?;
     let recording_end =
         parse_isapi_time(&recording.end).context("cannot parse recording end time")?;
 
-    let desired_start = time - clip_time;
-    let desired_end = time + clip_time;
-    let desired_len = clip_time * 2;
+    let desired_start = clamped_start;
+    let desired_end = clamped_end;
+    let desired_len = clamped_end - clamped_start;
     let file_len = recording_end - recording_start;
 
     let (window_start, window_end) = if file_len <= desired_len {
@@ -505,4 +568,87 @@ fn compute_isapi_clip_window(
     );
 
     Ok((offset_secs, duration_secs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cm_search_result_ok() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<CMSearchResult version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+    <searchID>C6022BA1-BB30-0001-B811-95A517711717</searchID>
+    <responseStatus>true</responseStatus>
+    <responseStatusStrg>OK</responseStatusStrg>
+    <numOfMatches>1</numOfMatches>
+    <matchList>
+        <searchMatchItem>
+            <timeSpan>
+                <startTime>2026-11-18T10:00:00Z</startTime>
+                <endTime>2026-11-18T10:15:00Z</endTime>
+            </timeSpan>
+            <mediaSegmentDescriptor>
+                <playbackURI>rtsp://192.168.1.17/Streaming/tracks/101/?starttime=20261118T100000Z&amp;endtime=20261118T101500Z&amp;size=10485760</playbackURI>
+            </mediaSegmentDescriptor>
+        </searchMatchItem>
+    </matchList>
+</CMSearchResult>"#;
+
+        let parsed: CmSearchResult = quick_xml::de::from_str(xml).expect("must parse XML");
+        assert_eq!(parsed.response_status_strg.as_deref(), Some("OK"));
+        assert_eq!(parsed.match_list.items.len(), 1);
+        assert_eq!(
+            parsed.match_list.items[0].time_span.start_time,
+            "2026-11-18T10:00:00Z"
+        );
+    }
+
+    #[test]
+    fn test_parse_cm_search_result_more() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<CMSearchResult version="2.0">
+    <responseStatusStrg>MORE</responseStatusStrg>
+    <numOfMatches>2</numOfMatches>
+    <matchList>
+        <searchMatchItem>
+            <timeSpan>
+                <startTime>2026-11-18T00:00:00Z</startTime>
+                <endTime>2026-11-18T01:00:00Z</endTime>
+            </timeSpan>
+            <mediaSegmentDescriptor>
+                <playbackURI>rtsp://192.168.1.17/test1</playbackURI>
+            </mediaSegmentDescriptor>
+        </searchMatchItem>
+        <searchMatchItem>
+            <timeSpan>
+                <startTime>2026-11-18T01:00:00Z</startTime>
+                <endTime>2026-11-18T02:00:00Z</endTime>
+            </timeSpan>
+            <mediaSegmentDescriptor>
+                <playbackURI>rtsp://192.168.1.17/test2</playbackURI>
+            </mediaSegmentDescriptor>
+        </searchMatchItem>
+    </matchList>
+</CMSearchResult>"#;
+
+        let parsed: CmSearchResult = quick_xml::de::from_str(xml).expect("must parse XML");
+        assert_eq!(parsed.response_status_strg.as_deref(), Some("MORE"));
+        assert_eq!(parsed.match_list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_response_status() {
+        let xml = r#"<ResponseStatus xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">
+<requestURL>/ISAPI/System/reboot</requestURL>
+<statusCode>1</statusCode>
+<statusString>OK</statusString>
+<subStatusCode>ok</subStatusCode>
+</ResponseStatus>"#;
+
+        let parsed: ResponseStatus = quick_xml::de::from_str(xml).expect("must parse XML");
+        assert_eq!(parsed.status_code, 1);
+        assert_eq!(parsed.status_string, "OK");
+        assert_eq!(parsed.sub_status_code, "ok");
+    }
 }

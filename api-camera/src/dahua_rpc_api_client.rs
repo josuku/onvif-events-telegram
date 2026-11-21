@@ -9,7 +9,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use crate::{MAX_DOWNLOAD_SECONDS, ffmpeg_trim_and_convert, get_clip_interval};
+use crate::{ffmpeg_trim_and_convert, get_clip_interval, get_clip_interval_clamped};
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_DAHUA_SD_DIR: &str = "/mnt/sd";
@@ -193,6 +193,14 @@ impl ApiCameraClient for DahuaRpcApiCameraClient {
         let mut client = self.connect_and_login().await?;
         tracing::info!("set_optical_zoom -> connected to Dahua camera");
         let result = client.set_optical_zoom(zoom).await;
+        client.logout().await.ok();
+        result
+    }
+
+    async fn reboot(&self) -> anyhow::Result<()> {
+        let mut client = self.connect_and_login().await?;
+        tracing::info!("reboot -> connected to Dahua camera");
+        let result = client.reboot().await;
         client.logout().await.ok();
         result
     }
@@ -494,6 +502,12 @@ impl DahuaClient {
         result.map(|_| ())
     }
 
+    pub async fn reboot(&mut self) -> Result<()> {
+        let resp = self.call("magicBox.reboot", json!(null)).await?;
+        tracing::info!("magicBox.reboot response: {resp}");
+        Ok(())
+    }
+
     fn next_request_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -599,11 +613,7 @@ fn compute_clip_window(
     time: DateTime<Utc>,
     clip_time: Duration,
 ) -> anyhow::Result<(f64, f64)> {
-    let (clip_start_time, clip_end_time) = get_clip_interval(time, clip_time);
-
-    if (clip_end_time - clip_start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-        anyhow::bail!("Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way");
-    }
+    let (clamped_start, clamped_end) = get_clip_interval_clamped(time, clip_time);
 
     let local_offset = *time.with_timezone(&Local).offset();
     let recording_start = parse_dahua_time(&recording.begin, local_offset)
@@ -611,9 +621,9 @@ fn compute_clip_window(
     let recording_end = parse_dahua_time(&recording.end, local_offset)
         .context("cannot parse recording end time")?;
 
-    let desired_start = time - clip_time;
-    let desired_end = time + clip_time;
-    let desired_len = clip_time * 2;
+    let desired_start = clamped_start;
+    let desired_end = clamped_end;
+    let desired_len = clamped_end - clamped_start;
     let file_len = recording_end - recording_start;
 
     let (window_start, window_end) = if file_len <= desired_len {

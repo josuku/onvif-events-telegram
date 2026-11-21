@@ -33,6 +33,7 @@ pub enum BotCommand {
     SetCredentials(String),
     FixSnapshot(CameraId),
     SetZoom(String),
+    Reboot(CameraId),
     // Events
     Subscribe(CameraId),
     Unsubscribe(CameraId),
@@ -444,6 +445,10 @@ async fn process_command(
                 .await
                 .map_err(anyhow_to_response_error)?
         }
+        BotCommand::Reboot(camera_id) => command_processor
+            .reboot_camera_cmd(chat_id, camera_id)
+            .await
+            .map_err(anyhow_to_response_error)?,
         BotCommand::Detect(camera_id) => {
             let camera_id = camera_id.trim();
             let camera_id = if camera_id.is_empty() || camera_id.eq_ignore_ascii_case("all") {
@@ -491,18 +496,14 @@ async fn process_command(
                         .await
                         .map_err(anyhow_to_response_error)?
                 }
-                Some(subcmd) if subcmd.eq_ignore_ascii_case("disable") => {
-                    command_processor
-                        .config_manual_detection_cmd(chat_id, false, None, None)
-                        .await
-                        .map_err(anyhow_to_response_error)?
-                }
-                _ => {
-                    command_processor
-                        .get_manual_detection_status_cmd(chat_id)
-                        .await
-                        .map_err(anyhow_to_response_error)?
-                }
+                Some(subcmd) if subcmd.eq_ignore_ascii_case("disable") => command_processor
+                    .config_manual_detection_cmd(chat_id, false, None, None)
+                    .await
+                    .map_err(anyhow_to_response_error)?,
+                _ => command_processor
+                    .get_manual_detection_status_cmd(chat_id)
+                    .await
+                    .map_err(anyhow_to_response_error)?,
             }
         }
         BotCommand::GetRecordingSummary(params) => {
@@ -738,8 +739,9 @@ fn update_button_in_markup(
                 if cb == target_callback {
                     btn_clone.text = new_text.to_string();
                     if let Some(ncb) = new_callback {
-                        btn_clone.kind =
-                            teloxide::types::InlineKeyboardButtonKind::CallbackData(ncb.to_string());
+                        btn_clone.kind = teloxide::types::InlineKeyboardButtonKind::CallbackData(
+                            ncb.to_string(),
+                        );
                     }
                 }
             }
@@ -765,6 +767,7 @@ fn help_text() -> String {
 /setcredentials `camera_id username password` \\- update credentials
 /setzoom `camera_id zoom`, \\- zoom camera \\(range 1\\-100\\)
 /fixsnapshot `camera_id` \\- fix or resolve snapshot URI
+/reboot `camera_id` \\- reboot camera
 
 🔔 *EVENTS*
 /subscribe `camera_id` \\- subscribe to camera notifications
@@ -1000,17 +1003,12 @@ fn resolve_target_date(
     today - chrono::Duration::days(days_ago as i64)
 }
 
-fn combine_local_date_and_time(
-    date: chrono::NaiveDate,
-    time: chrono::NaiveTime,
-) -> DateTime<Utc> {
+fn combine_local_date_and_time(date: chrono::NaiveDate, time: chrono::NaiveTime) -> DateTime<Utc> {
     let naive_dt = date.and_time(time);
     match chrono::Local.from_local_datetime(&naive_dt) {
         chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc),
         chrono::LocalResult::Ambiguous(dt1, _) => dt1.with_timezone(&Utc),
-        chrono::LocalResult::None => {
-            DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc)
-        }
+        chrono::LocalResult::None => DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc),
     }
 }
 
@@ -1145,11 +1143,17 @@ mod tests {
     fn test_parse_datetime_keywords_today_and_yesterday() {
         let today_dt = parse_datetime_query("today").unwrap();
         let expected_today = chrono::Local::now().date_naive();
-        assert_eq!(today_dt.with_timezone(&chrono::Local).date_naive(), expected_today);
+        assert_eq!(
+            today_dt.with_timezone(&chrono::Local).date_naive(),
+            expected_today
+        );
 
         let yest_dt = parse_datetime_query("yesterday").unwrap();
         let expected_yest = expected_today - chrono::Duration::days(1);
-        assert_eq!(yest_dt.with_timezone(&chrono::Local).date_naive(), expected_yest);
+        assert_eq!(
+            yest_dt.with_timezone(&chrono::Local).date_naive(),
+            expected_yest
+        );
     }
 
     #[test]
@@ -1194,7 +1198,10 @@ mod tests {
         let (cam_id, dt, clip) = parse_recording_params("3 last monday 60", usage).unwrap();
         assert_eq!(cam_id, 3);
         assert_eq!(clip, Some(Duration::seconds(60)));
-        assert_eq!(dt.with_timezone(&chrono::Local).date_naive().weekday(), chrono::Weekday::Mon);
+        assert_eq!(
+            dt.with_timezone(&chrono::Local).date_naive().weekday(),
+            chrono::Weekday::Mon
+        );
 
         let (cam_id, _, clip) = parse_recording_params("5 last monday", usage).unwrap();
         assert_eq!(cam_id, 5);
@@ -1214,8 +1221,7 @@ mod tests {
     #[test]
     fn test_parse_recording_params_without_clip() {
         let usage = "usage: /cmd id date [clip]";
-        let (cam_id, dt, clip) =
-            parse_recording_params("5 2026-11-05T10:00:00Z", usage).unwrap();
+        let (cam_id, dt, clip) = parse_recording_params("5 2026-11-05T10:00:00Z", usage).unwrap();
         assert_eq!(cam_id, 5);
         assert_eq!(dt.to_rfc3339(), "2026-11-05T10:00:00+00:00");
         assert_eq!(clip, None);
