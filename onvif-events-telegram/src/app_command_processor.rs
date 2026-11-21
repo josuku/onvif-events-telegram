@@ -918,19 +918,52 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    match self
-                        .notifier
-                        .send_video_message(&file_path, chat_id, Some(message_id))
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::info!("deleting file {file_path:?} after send");
-                            tokio::fs::remove_file(&file_path).await.ok();
-                        }
+                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
+                        Ok(p) => p,
                         Err(err) => {
-                            tracing::error!("cannot send video message. {}", err);
-                            return Err(DownloadRecordingError::ErrorSendingVideo);
+                            tracing::warn!("split failed, sending original: {err}");
+                            vec![std::path::PathBuf::from(&file_path)]
                         }
+                    };
+                    let total_parts = parts.len();
+                    for (i, part_path) in parts.iter().enumerate() {
+                        let part_str = part_path.to_string_lossy().to_string();
+                        let label = if total_parts > 1 {
+                            format!("📹 Part {}/{}", i + 1, total_parts)
+                        } else {
+                            String::new()
+                        };
+                        if !label.is_empty() {
+                            self.notifier
+                                .send_text_message(label, vec![chat_id])
+                                .await;
+                        }
+                        match self
+                            .notifier
+                            .send_video_message(&part_str, chat_id, Some(message_id))
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::info!("deleting file {part_str:?} after send");
+                                tokio::fs::remove_file(&part_str).await.ok();
+                            }
+                            Err(err) => {
+                                tracing::error!("cannot send video message. {}", err);
+                                // cleanup remaining parts
+                                for remaining in &parts[i..] {
+                                    tokio::fs::remove_file(remaining).await.ok();
+                                }
+                                // cleanup original if different from parts
+                                if total_parts > 1 {
+                                    tokio::fs::remove_file(&file_path).await.ok();
+                                }
+                                return Err(DownloadRecordingError::ErrorSendingVideo);
+                            }
+                        }
+                    }
+                    // cleanup original file if it was split into parts
+                    if total_parts > 1 {
+                        tokio::fs::remove_file(&file_path).await.ok();
                     }
                     return Ok(());
                 }
@@ -1346,20 +1379,47 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    match notifier.send_video_message(&file_path, chat_id, None).await {
-                        Ok(_) => {
-                            tracing::info!("deleting file {file_path:?} after send");
-                            tokio::fs::remove_file(&file_path).await.ok();
-                        }
+                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
+                        Ok(p) => p,
                         Err(err) => {
-                            tracing::error!("cannot send video message: {err}");
+                            tracing::warn!("split failed, sending original: {err}");
+                            vec![std::path::PathBuf::from(&file_path)]
+                        }
+                    };
+                    let total_parts = parts.len();
+                    for (i, part_path) in parts.iter().enumerate() {
+                        let part_str = part_path.to_string_lossy().to_string();
+                        if total_parts > 1 {
                             notifier
                                 .send_text_message(
-                                    format!("❌ Error sending video: {err}"),
+                                    format!("📹 Part {}/{}", i + 1, total_parts),
                                     vec![chat_id],
                                 )
                                 .await;
                         }
+                        match notifier.send_video_message(&part_str, chat_id, None).await {
+                            Ok(_) => {
+                                tracing::info!("deleting file {part_str:?} after send");
+                                tokio::fs::remove_file(&part_str).await.ok();
+                            }
+                            Err(err) => {
+                                tracing::error!("cannot send video message: {err}");
+                                notifier
+                                    .send_text_message(
+                                        format!("❌ Error sending video part {}: {err}", i + 1),
+                                        vec![chat_id],
+                                    )
+                                    .await;
+                                // cleanup remaining
+                                for remaining in &parts[i..] {
+                                    tokio::fs::remove_file(remaining).await.ok();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if total_parts > 1 {
+                        tokio::fs::remove_file(&file_path).await.ok();
                     }
                 }
                 Err(err) => {

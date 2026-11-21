@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use dvrip_rs::{Authentication, Connection, DVRIPCam, FileManagement, SystemInfo};
 
-use crate::{MAX_DOWNLOAD_SECONDS, MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval};
+use crate::{MAX_FILES, ffmpeg_trim_and_convert, get_clip_interval, get_clip_interval_clamped};
 
 // Implementation for XMEye-icSEE compatible chinese cameras. DvrIp is the protocol they use
 
@@ -254,13 +254,7 @@ impl ApiCameraClient for DvrIpXmeyeApiCameraClient {
             anyhow::bail!("no recordings to download");
         }
 
-        let (start_time, end_time) = get_clip_interval(event_time, clip_time);
-
-        if (end_time - start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-            anyhow::bail!(
-                "Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way"
-            );
-        }
+        let (start_time, end_time) = get_clip_interval_clamped(event_time, clip_time);
 
         let target_name_with_extension = self
             .download_window(recordings, event_time, start_time, end_time, &target_name)

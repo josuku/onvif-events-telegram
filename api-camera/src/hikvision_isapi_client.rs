@@ -10,7 +10,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
-use crate::{MAX_DOWNLOAD_SECONDS, ffmpeg_trim_and_convert, get_clip_interval};
+use crate::{ffmpeg_trim_and_convert, get_clip_interval, get_clip_interval_clamped};
 
 const REQUEST_TIMEOUT_SECS: u64 = 15;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
@@ -522,19 +522,16 @@ fn compute_isapi_clip_window(
     time: DateTime<Utc>,
     clip_time: Duration,
 ) -> Result<(f64, f64)> {
-    let (clip_start_time, clip_end_time) = get_clip_interval(time, clip_time);
-    if (clip_end_time - clip_start_time).num_seconds() > MAX_DOWNLOAD_SECONDS {
-        anyhow::bail!("Downloads of more than {MAX_DOWNLOAD_SECONDS} are forbidden in this way");
-    }
+    let (clamped_start, clamped_end) = get_clip_interval_clamped(time, clip_time);
 
     let recording_start =
         parse_isapi_time(&recording.begin).context("cannot parse recording begin time")?;
     let recording_end =
         parse_isapi_time(&recording.end).context("cannot parse recording end time")?;
 
-    let desired_start = time - clip_time;
-    let desired_end = time + clip_time;
-    let desired_len = clip_time * 2;
+    let desired_start = clamped_start;
+    let desired_end = clamped_end;
+    let desired_len = clamped_end - clamped_start;
     let file_len = recording_end - recording_start;
 
     let (window_start, window_end) = if file_len <= desired_len {

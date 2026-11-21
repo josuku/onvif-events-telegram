@@ -50,7 +50,6 @@ winget install BtbN.FFmpeg.LGPL
 Or copy ffmpeg.exe in the same directory of the bot .exe file
 
 TODOs
-- [ ] fix. Telegram has a 50mb limit do download files. Change limit from 600seconds to 50mb, and if a file is higher than this limit, split in several video files
 - [ ] get available onvif services
 - [ ] add oxvif implementation for onvif camera client
 - [ ] add ort implementation for object detection
