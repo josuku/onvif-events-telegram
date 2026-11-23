@@ -17,7 +17,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 api-camera = { path = "../api-camera" }
+api-http = { path = "../api-http" }
 app-core = { path = "../app-core" }
+app-services = { path = "../app-services" }
 onvif = { path = "../onvif" }
 repository = { path = "../repository" }
 telegram = { path = "../telegram" }

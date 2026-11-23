@@ -4,7 +4,7 @@ use api_camera::{
 };
 use app_core::{
     domain::{
-        camera::{CameraData, CameraStatus, SnapshotMethod},
+        camera::{CameraData, SnapshotMethod},
         object::{object_classes_to_string, ObjectClass},
     },
     helpers::network::is_reachable,
@@ -12,39 +12,40 @@ use app_core::{
     traits::{
         api_camera_client::ApiCameraClient, command_processor::CommandProcessor,
         command_processor::DownloadRecordingError, discovery_client::OnvifRsDiscoveryClient,
-        notifier::Notifier, object_detector::ObjectDetector,
-        onvif_camera_client::OnvifCameraClient,
+        notifier::Notifier,
     },
     CameraId, ChatId, MessageId,
 };
+use app_services::{CameraService, ConfigService, MediaService};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use onvif::{
-    onvif_rs_camera_client::create_onvif_camera_client,
-    onvif_rs_discovery_client::OnvifDiscoveryClient,
-    onvif_rs_service_clients::{DEFAULT_PASSWORD, DEFAULT_USERNAME},
-};
+use onvif::onvif_rs_discovery_client::OnvifDiscoveryClient;
 use repository::memory_repository::MemoryRepository;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::sync::Arc;
 use tracing::{error, info};
 
 pub struct AppCommandProcessor {
     repository: Arc<MemoryRepository>,
     notifier: Arc<dyn Notifier>,
-    object_detector: Arc<Mutex<dyn ObjectDetector>>,
+    pub camera_service: Arc<CameraService>,
+    pub media_service: Arc<MediaService>,
+    pub config_service: Arc<ConfigService>,
 }
 
 impl AppCommandProcessor {
     pub fn new(
         repository: Arc<MemoryRepository>,
         notifier: Arc<dyn Notifier>,
-        object_detector: Arc<Mutex<dyn ObjectDetector>>,
+        camera_service: Arc<CameraService>,
+        media_service: Arc<MediaService>,
+        config_service: Arc<ConfigService>,
     ) -> Self {
         Self {
             repository,
             notifier,
-            object_detector,
+            camera_service,
+            media_service,
+            config_service,
         }
     }
 
@@ -65,14 +66,16 @@ impl AppCommandProcessor {
     }
 
     async fn get_snapshot_of_camera_id(&self, chat_id: ChatId, camera_id: CameraId) {
-        let repository = self.repository.clone();
+        let media_service = self.media_service.clone();
+        let camera_service = self.camera_service.clone();
         let notifier = self.notifier.clone();
 
         tokio::spawn(async move {
-            let camera = match repository.get_camera(camera_id).await {
-                Some(camera) => camera,
-                None => {
-                    let error = format!("❌ cannot find camera with id: {}", camera_id);
+            let camera = match camera_service.get_camera(camera_id).await {
+                Ok(camera) => camera,
+                Err(err) => {
+                    let error = format!("❌ cannot find camera with id:{}", camera_id);
+                    error!("{}. {}", error, err);
                     notifier
                         .send_text_message(error.clone(), vec![chat_id])
                         .await;
@@ -81,7 +84,7 @@ impl AppCommandProcessor {
                 }
             };
 
-            let snapshot = match camera.get_snapshot().await {
+            let snapshot = match media_service.get_snapshot(camera_id).await {
                 Ok(snapshot) => snapshot,
                 Err(err) => {
                     let error = format!(
@@ -154,79 +157,49 @@ impl AppCommandProcessor {
     }
 
     async fn detect_of_camera_id(&self, chat_id: ChatId, camera_id: CameraId) {
-        let repository = self.repository.clone();
+        let media_service = self.media_service.clone();
         let notifier = self.notifier.clone();
-        let object_detector = self.object_detector.clone();
 
         tokio::spawn(async move {
-            let camera = match repository.get_camera(camera_id).await {
-                Some(camera) => camera,
-                None => {
-                    let error = format!("❌ cannot find camera with id: {camera_id}");
-                    notifier
-                        .send_text_message(error.clone(), vec![chat_id])
-                        .await;
-                    tracing::error!(error);
-                    return;
-                }
-            };
+            match media_service.detect_objects(camera_id).await {
+                Ok(outcome) => {
+                    let caption = if outcome.objects.is_empty() {
+                        format!(
+                            "MANUAL DETECTION\nCamera: {} (id:{})\nTime: {}\nNo objects detected",
+                            outcome.camera_name,
+                            outcome.camera_id,
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z")
+                        )
+                    } else {
+                        make_caption(
+                            "Manual Detection",
+                            &outcome.camera_name,
+                            &outcome.camera_id,
+                            &chrono::Utc::now(),
+                            None,
+                            &outcome.objects,
+                        )
+                    };
 
-            let snapshot = match camera.get_snapshot().await {
-                Ok(snapshot) => snapshot,
+                    let _ = notifier
+                        .send_picture_message(
+                            &caption,
+                            outcome.snapshot,
+                            chat_id,
+                            camera_id,
+                            &chrono::Utc::now(),
+                        )
+                        .await;
+                }
                 Err(err) => {
-                    let error = format!(
-                        "❌ error getting snapshot from camera:{:?} err:{}",
-                        camera.name, err
-                    );
+                    let error = format!("❌ error during detection for camera: {}", camera_id);
+                    error!("{}. {}", error, err);
                     notifier
                         .send_text_message(error.clone(), vec![chat_id])
                         .await;
                     tracing::error!(error);
-                    return;
                 }
             };
-
-            let config = repository.get_config().await;
-            let objects = {
-                let mut detector = object_detector.lock().await;
-                match detector.detect(
-                    &snapshot,
-                    config.detector.min_confidence,
-                    &config.detector.types,
-                ) {
-                    Ok(objs) => objs,
-                    Err(err) => {
-                        tracing::error!(
-                            "error detecting objects in camera {}: {}",
-                            camera.name,
-                            err
-                        );
-                        Vec::new()
-                    }
-                }
-            };
-
-            let caption = if objects.is_empty() {
-                format!(
-                    "MANUAL DETECTION\nCamera: {} (id:{})\nTime: {}\nNo objects detected",
-                    camera.name,
-                    camera.id,
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z")
-                )
-            } else {
-                make_caption(
-                    "Manual Detection",
-                    &camera.name,
-                    &camera.id,
-                    &chrono::Utc::now(),
-                    None,
-                    &objects,
-                )
-            };
-
-            let _ = notifier
-                .send_picture_message(&caption, snapshot, chat_id, camera_id, &chrono::Utc::now())
-                .await;
         });
     }
 }
@@ -307,8 +280,8 @@ impl CommandProcessor for AppCommandProcessor {
             "command SubsSetCameraName - chat id:{} camera_id:{} camera_name:{}",
             chat_id, camera_id, camera_name
         );
-        let _ = match self
-            .repository
+        match self
+            .camera_service
             .set_camera_name(camera_id, camera_name)
             .await
         {
@@ -369,7 +342,7 @@ impl CommandProcessor for AppCommandProcessor {
         if let Some(camera_id) = camera_id {
             let _ = self.get_snapshot_of_camera_id(chat_id, camera_id).await;
         } else {
-            for camera in self.repository.get_sorted_cameras().await.iter() {
+            for camera in self.camera_service.get_cameras().await.iter() {
                 let _ = self.get_snapshot_of_camera_id(chat_id, camera.id).await;
             }
         }
@@ -382,9 +355,7 @@ impl CommandProcessor for AppCommandProcessor {
             "command ConfigPollingTime - chat id:{} seconds:{}",
             chat_id, seconds
         );
-        self.repository
-            .config_polling_seconds(seconds, chat_id)
-            .await;
+        self.config_service.set_polling_seconds(seconds).await.ok();
         self.send_success("Polling time config updated successfully", chat_id)
             .await;
         Ok(())
@@ -395,9 +366,7 @@ impl CommandProcessor for AppCommandProcessor {
             "command ConfigBetweenTime - chat id:{} seconds:{}",
             chat_id, seconds
         );
-        self.repository
-            .config_between_seconds(seconds, chat_id)
-            .await;
+        self.config_service.set_between_seconds(seconds).await.ok();
         self.send_success("Between time config updated successfully", chat_id)
             .await;
         Ok(())
@@ -409,9 +378,7 @@ impl CommandProcessor for AppCommandProcessor {
         send_errors: bool,
     ) -> anyhow::Result<()> {
         info!("command ConfigSendErrors - send_errors:{}", send_errors);
-        self.repository
-            .config_send_errors(send_errors, chat_id)
-            .await;
+        self.config_service.set_send_errors(send_errors).await.ok();
         self.send_success("Send errors config updated successfully", chat_id)
             .await;
         Ok(())
@@ -419,7 +386,7 @@ impl CommandProcessor for AppCommandProcessor {
 
     async fn config_auto_renewal_cmd(&self, chat_id: ChatId, enable: bool) -> anyhow::Result<()> {
         info!("command ConfigAutoRenewal - enable:{}", enable);
-        self.repository.config_auto_renewal(enable, chat_id).await;
+        self.config_service.set_auto_renewal(enable).await.ok();
         self.send_success("Auto renewal config updated successfully", chat_id)
             .await;
         Ok(())
@@ -427,9 +394,7 @@ impl CommandProcessor for AppCommandProcessor {
 
     async fn config_recording_clip_cmd(&self, chat_id: ChatId, seconds: u64) -> anyhow::Result<()> {
         info!("command ConfiRecordingClip - seconds:{}", seconds);
-        self.repository
-            .config_recording_clip(seconds, chat_id)
-            .await;
+        self.config_service.set_recording_clip(seconds).await.ok();
         self.send_success("Recording clip config updated successfully", chat_id)
             .await;
         Ok(())
@@ -441,9 +406,7 @@ impl CommandProcessor for AppCommandProcessor {
         enable: bool,
     ) -> anyhow::Result<()> {
         info!("command ConfigDetectorEnable - enable:{}", enable);
-        self.repository
-            .config_detector_enable(enable, chat_id)
-            .await;
+        self.config_service.set_detector_enable(enable).await.ok();
         self.send_success("Detector enable config updated successfully", chat_id)
             .await;
         Ok(())
@@ -458,9 +421,10 @@ impl CommandProcessor for AppCommandProcessor {
             "command ConfigDetectorMinConfidence - min_confidence:{}",
             confidence
         );
-        self.repository
-            .config_detector_min_confidence(confidence, chat_id)
-            .await;
+        self.config_service
+            .set_detector_min_confidence(confidence)
+            .await
+            .ok();
         self.send_success(
             "Detector min confidence config updated successfully",
             chat_id,
@@ -478,7 +442,7 @@ impl CommandProcessor for AppCommandProcessor {
             "command ConfigDetectorTypes - types:{}",
             object_classes_to_string(&types),
         );
-        self.repository.config_detector_types(types, chat_id).await;
+        self.config_service.set_detector_types(types).await.ok();
         self.send_success("Detector types config updated successfully", chat_id)
             .await;
         Ok(())
@@ -496,8 +460,8 @@ impl CommandProcessor for AppCommandProcessor {
         );
 
         match self
-            .repository
-            .update_multi_channel_detection(camera_id, enable)
+            .camera_service
+            .set_multi_channel_detection(camera_id, enable)
             .await
         {
             Ok(_) => {
@@ -517,8 +481,8 @@ impl CommandProcessor for AppCommandProcessor {
 
     async fn get_config(&self, chat_id: ChatId) {
         info!("command GetConfig");
-        let config = self.repository.get_config().await;
-        let available_types = self.repository.get_detector_types().await;
+        let config = self.config_service.get_config().await;
+        let available_types = self.config_service.get_available_detector_types().await;
         let message = format!(
             r#"
 CURRENT CONFIG
@@ -549,7 +513,7 @@ CURRENT CONFIG
 
     async fn reset_config(&self, chat_id: ChatId) {
         info!("command ResetConfig");
-        self.repository.reset_config().await;
+        self.config_service.reset_config().await;
         self.get_config(chat_id).await;
     }
 
@@ -573,8 +537,8 @@ CURRENT CONFIG
         };
 
         match self
-            .repository
-            .update_snapshot_method(camera_id, snapshot_method)
+            .camera_service
+            .set_snapshot_method(camera_id, snapshot_method)
             .await
         {
             Ok(_) => {
@@ -601,103 +565,14 @@ CURRENT CONFIG
             "command FixSnapshotCmd - chat id:{} camera_id:{}",
             chat_id, camera_id
         );
-        let camera = match self.repository.get_camera(camera_id).await {
-            Some(camera) => camera,
-            None => {
-                let error = format!("cannot find camera with id: {}", camera_id);
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
+        match self.camera_service.fix_snapshot_uri(camera_id).await {
+            Ok(uri) => {
+                let message = format!("Camera snapshot uri fixed: {}", uri);
+                self.send_success(&message, chat_id).await;
             }
-        };
-
-        if let Some(snapshot_uri) = camera.snapshot_uri {
-            match camera
-                .onvif_client
-                .create_user_and_fix_snapshot_uri(
-                    &camera.onvif_client.get_connection_data().uri,
-                    &snapshot_uri,
-                )
-                .await
-            {
-                Ok(fixed_uri) => {
-                    if let Err(err) = self
-                        .repository
-                        .update_snapshot_uri_from_camera(camera_id, &snapshot_uri)
-                        .await
-                    {
-                        self.send_error(&err.to_string(), chat_id).await;
-                        anyhow::bail!(err.to_string());
-                    }
-
-                    let message = format!("Camera snapshot uri fixed:{}", fixed_uri);
-                    self.send_success(&message, chat_id).await;
-
-                    let client = match create_onvif_camera_client(
-                        &camera.onvif_client.get_connection_data().uri,
-                        DEFAULT_USERNAME,
-                        DEFAULT_PASSWORD,
-                    )
-                    .await
-                    {
-                        Ok(client) => client,
-                        Err(err) => {
-                            let error = format!(
-                                "cannot connect to camera {} with new credentials: {}",
-                                camera_id, err
-                            );
-                            self.send_error(&error, chat_id).await;
-                            anyhow::bail!(error);
-                        }
-                    };
-
-                    match self
-                        .repository
-                        .update_camera_credentials(
-                            camera_id,
-                            Arc::new(client),
-                            DEFAULT_USERNAME,
-                            DEFAULT_PASSWORD,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            self.send_success("Credentials updated successfully", chat_id)
-                                .await
-                        }
-                        Err(err) => {
-                            self.send_error(&err.to_string(), chat_id).await;
-                            anyhow::bail!(err.to_string());
-                        }
-                    }
-                }
-                Err(err) => {
-                    self.send_error(&err.to_string(), chat_id).await;
-                    anyhow::bail!(err.to_string());
-                }
-            }
-        } else {
-            match camera.onvif_client.get_snapshot_uri().await {
-                Ok(uri) => {
-                    match self
-                        .repository
-                        .update_snapshot_uri_from_camera(camera_id, &uri)
-                        .await
-                    {
-                        Ok(_) => {
-                            let message = format!("Camera snapshot uri resolved:{}", uri);
-                            self.send_success(&message, chat_id).await;
-                        }
-                        Err(err) => {
-                            self.send_error(&err.to_string(), chat_id).await;
-                            anyhow::bail!(err.to_string());
-                        }
-                    }
-                }
-                Err(err) => {
-                    let error = format!("cannot resolve snapshot uri: {}", err);
-                    self.send_error(&error, chat_id).await;
-                    anyhow::bail!(error);
-                }
+            Err(err) => {
+                self.send_error(&err.to_string(), chat_id).await;
+                anyhow::bail!(err.to_string());
             }
         }
         Ok(())
@@ -732,45 +607,14 @@ CURRENT CONFIG
             chat_id, uri, username
         );
 
-        let client = match create_onvif_camera_client(uri, username, password).await {
-            Ok(client) => client,
-            Err(err) => {
-                let error = format!("cannot connect to camera at {}: {}", uri, err);
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
-
-        let snapshot_uri = client.get_snapshot_uri().await.ok();
-        let rtsp_uri = client.get_rtsp_uri().await.ok();
-
-        let mut camera_data = CameraData {
-            id: 0, // 0 -> nueva cámara, el repositorio le asigna id
-            name: uri.to_string(),
-            address: uri.to_string(),
-            snapshot_uri,
-            snapshot_method: SnapshotMethod::Api,
-            rtsp_uri,
-            multi_channel_detection: false,
-            onvif_client: Arc::new(client),
-            api_camera_client: None,
-            device_info: None,
-            subscriptors: Vec::new(),
-            status: CameraStatus {
-                last_polling: None,
-                last_error: None,
-                last_error_notified: false,
-                last_notification_by_chat_id: HashMap::new(),
-                today_notifications: Vec::new(),
-                event_subscription_failures: 0,
-            },
-        };
-        camera_data.device_info = camera_data.get_device_info().await;
-
-        match self.repository.add_camera(camera_data).await {
-            Ok(_) => {
-                let message = "Camera added successfully. Use /getcameras to see its id and /setcameraname to rename it.";
-                self.send_success(message, chat_id).await;
+        match self
+            .camera_service
+            .add_camera(uri, username, password)
+            .await
+        {
+            Ok(camera_id) => {
+                let message = format!("Camera {camera_id} added successfully. Use /getcameras /setcameraname or /setcredentials.");
+                self.send_success(&message, chat_id).await;
             }
             Err(err) => {
                 self.send_error(&err.to_string(), chat_id).await;
@@ -787,7 +631,7 @@ CURRENT CONFIG
             chat_id, camera_id
         );
 
-        match self.repository.delete_camera(camera_id).await {
+        match self.camera_service.delete_camera(camera_id).await {
             Ok(_) => {
                 self.send_success("Camera deleted successfully", chat_id)
                     .await
@@ -812,30 +656,9 @@ CURRENT CONFIG
             chat_id, camera_id, username
         );
 
-        let uri = match self.repository.get_camera(camera_id).await {
-            Some(camera) => camera.onvif_client.get_connection_data().uri,
-            None => {
-                let error = format!("camera {} not found", camera_id);
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
-
-        let client = match create_onvif_camera_client(&uri, username, password).await {
-            Ok(client) => client,
-            Err(err) => {
-                let error = format!(
-                    "cannot connect to camera {} with new credentials: {}",
-                    camera_id, err
-                );
-                self.send_error(&error, chat_id).await;
-                anyhow::bail!(error);
-            }
-        };
-
         match self
-            .repository
-            .update_camera_credentials(camera_id, Arc::new(client), username, password)
+            .camera_service
+            .set_credentials(camera_id, username, password)
             .await
         {
             Ok(_) => {
@@ -918,13 +741,16 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
-                        Ok(p) => p,
-                        Err(err) => {
-                            tracing::warn!("split failed, sending original: {err}");
-                            vec![std::path::PathBuf::from(&file_path)]
-                        }
-                    };
+                    let parts =
+                        match api_camera::split_video_if_needed(std::path::Path::new(&file_path))
+                            .await
+                        {
+                            Ok(p) => p,
+                            Err(err) => {
+                                tracing::warn!("split failed, sending original: {err}");
+                                vec![std::path::PathBuf::from(&file_path)]
+                            }
+                        };
                     let total_parts = parts.len();
                     for (i, part_path) in parts.iter().enumerate() {
                         let part_str = part_path.to_string_lossy().to_string();
@@ -934,9 +760,7 @@ CURRENT CONFIG
                             String::new()
                         };
                         if !label.is_empty() {
-                            self.notifier
-                                .send_text_message(label, vec![chat_id])
-                                .await;
+                            self.notifier.send_text_message(label, vec![chat_id]).await;
                         }
                         match self
                             .notifier
@@ -1030,10 +854,11 @@ CURRENT CONFIG
     }
 
     async fn reboot_camera_cmd(&self, chat_id: ChatId, camera_id: CameraId) -> anyhow::Result<()> {
-        let (camera_data, api_camera_client) = match self.get_api_camera_client(camera_id, chat_id).await {
-            Some(res) => res,
-            None => anyhow::bail!("camera or api client not available"),
-        };
+        let (camera_data, api_camera_client) =
+            match self.get_api_camera_client(camera_id, chat_id).await {
+                Some(res) => res,
+                None => anyhow::bail!("camera or api client not available"),
+            };
 
         let camera_uri = camera_data.onvif_client.get_connection_data().uri;
         let camera_name = camera_data.name.clone();
@@ -1379,13 +1204,16 @@ CURRENT CONFIG
                 .await
             {
                 Ok(file_path) => {
-                    let parts = match api_camera::split_video_if_needed(std::path::Path::new(&file_path)).await {
-                        Ok(p) => p,
-                        Err(err) => {
-                            tracing::warn!("split failed, sending original: {err}");
-                            vec![std::path::PathBuf::from(&file_path)]
-                        }
-                    };
+                    let parts =
+                        match api_camera::split_video_if_needed(std::path::Path::new(&file_path))
+                            .await
+                        {
+                            Ok(p) => p,
+                            Err(err) => {
+                                tracing::warn!("split failed, sending original: {err}");
+                                vec![std::path::PathBuf::from(&file_path)]
+                            }
+                        };
                     let total_parts = parts.len();
                     for (i, part_path) in parts.iter().enumerate() {
                         let part_str = part_path.to_string_lossy().to_string();

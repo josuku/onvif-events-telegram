@@ -1,0 +1,20 @@
+[package]
+name = "app-services"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.89"
+chrono = "0.4.38"
+thiserror = "2.0.20"
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+
+app-core = { path = "../app-core" }
+api-camera = { path = "../api-camera" }
+onvif = { path = "../onvif" }
+repository = { path = "../repository" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = "9.3"

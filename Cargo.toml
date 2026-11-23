@@ -1,3 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["api-camera", "app-core", "onvif", "onvif-events-telegram", "repository", "telegram", "ultralytics-detector"]
+members = [
+    "api-camera",
+    "api-http",
+    "app-core",
+    "app-services",
+    "onvif",
+    "onvif-events-telegram",
+    "repository",
+    "telegram",
+    "ultralytics-detector"
+]

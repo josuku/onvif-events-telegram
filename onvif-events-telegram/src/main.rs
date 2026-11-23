@@ -51,10 +51,20 @@ async fn main() {
         UltralyticsDetector::new("./models/yolo11n.onnx").expect("cannot create object detector"),
     ));
 
+    let auth_service = Arc::new(app_services::AuthService::new(config.http.auth.clone()));
+    let camera_service = Arc::new(app_services::CameraService::new(repository.clone()));
+    let media_service = Arc::new(app_services::MediaService::new(
+        repository.clone(),
+        object_detector.clone(),
+    ));
+    let config_service = Arc::new(app_services::ConfigService::new(repository.clone()));
+
     let app_command_processor: Arc<dyn CommandProcessor> = Arc::new(AppCommandProcessor::new(
         repository.clone(),
         notifier.clone(),
-        object_detector.clone(),
+        camera_service.clone(),
+        media_service.clone(),
+        config_service.clone(),
     ));
 
     let telegram_bot = Arc::new(TelegramBot::new(
@@ -66,8 +76,18 @@ async fn main() {
         repository.clone(),
     ));
 
+    let http_state = api_http::state::AppState {
+        auth_service: auth_service.clone(),
+        camera_service: camera_service.clone(),
+        media_service: media_service.clone(),
+        config_service: config_service.clone(),
+    };
+
+    let http_config = config.http.clone();
+
     select! {
         _ = start_bot(telegram_bot) => (),
+        _ = start_http_server(http_state, http_config) => (),
         _ = start_polling(notifier, repository.clone(), event_bus.clone(), object_detector.clone()) => (),
         _ = start_manual_detection_loop(repository.clone(), event_bus.clone(), object_detector) => (),
         _ = renew_subscriptions(repository.clone()) => (),
@@ -75,6 +95,23 @@ async fn main() {
             close_subscriptions(repository).await;
             info!("Closing app")
         },
+    }
+}
+
+async fn start_http_server(
+    state: api_http::state::AppState,
+    config: app_core::domain::config::HttpConfig,
+) {
+    if !config.enabled {
+        info!("HTTP API is disabled in configuration");
+        return;
+    }
+    let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .expect("Valid HTTP host:port socket address");
+
+    if let Err(err) = api_http::run_server(state, addr).await {
+        error!("HTTP API server error: {}", err);
     }
 }
 

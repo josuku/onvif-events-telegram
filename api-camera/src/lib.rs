@@ -164,7 +164,10 @@ pub async fn get_video_duration(video_path: &Path) -> anyhow::Result<f64> {
     }
 
     let out_str = String::from_utf8_lossy(&output.stdout);
-    let dur = out_str.trim().parse::<f64>().context("failed to parse video duration from ffprobe")?;
+    let dur = out_str
+        .trim()
+        .parse::<f64>()
+        .context("failed to parse video duration from ffprobe")?;
     Ok(dur)
 }
 
@@ -253,6 +256,9 @@ pub async fn split_video_if_needed(video_path: &Path) -> anyhow::Result<Vec<std:
         anyhow::bail!("ffmpeg segment completed but no split files were produced");
     }
 
-    tracing::info!("Successfully split {video_path:?} into {} files: {parts:?}", parts.len());
+    tracing::info!(
+        "Successfully split {video_path:?} into {} files: {parts:?}",
+        parts.len()
+    );
     Ok(parts)
 }
