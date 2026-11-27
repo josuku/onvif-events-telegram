@@ -1,10 +1,10 @@
 use crate::{dto::AuthErrorResponse, state::AppState};
 use axum::{
+    Json,
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 
 pub async fn auth_middleware(
@@ -110,13 +110,19 @@ mod tests {
             .header(header::AUTHORIZATION, "bearer my-jwt-token-2")
             .body(())
             .unwrap();
-        assert_eq!(extract_token(&req_lower), Some("my-jwt-token-2".to_string()));
+        assert_eq!(
+            extract_token(&req_lower),
+            Some("my-jwt-token-2".to_string())
+        );
     }
 
     #[test]
     fn test_extract_token_from_cookie() {
         let req = Request::builder()
-            .header(header::COOKIE, "other=123; token=cookie-token-abc; session=xyz")
+            .header(
+                header::COOKIE,
+                "other=123; token=cookie-token-abc; session=xyz",
+            )
             .body(())
             .unwrap();
         assert_eq!(extract_token(&req), Some("cookie-token-abc".to_string()));
@@ -125,7 +131,10 @@ mod tests {
             .header(header::COOKIE, "auth_token=my-auth-cookie")
             .body(())
             .unwrap();
-        assert_eq!(extract_token(&req_auth_cookie), Some("my-auth-cookie".to_string()));
+        assert_eq!(
+            extract_token(&req_auth_cookie),
+            Some("my-auth-cookie".to_string())
+        );
     }
 
     #[test]
@@ -139,10 +148,7 @@ mod tests {
 
     #[test]
     fn test_extract_token_none_when_missing() {
-        let req = Request::builder()
-            .uri("/api/v1/cameras")
-            .body(())
-            .unwrap();
+        let req = Request::builder().uri("/api/v1/cameras").body(()).unwrap();
         assert_eq!(extract_token(&req), None);
     }
 }

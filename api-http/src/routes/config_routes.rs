@@ -1,5 +1,8 @@
 use crate::{
-    dto::{GenericMessageResponse, UpdateDetectorConfigRequest, UpdatePollingConfigRequest},
+    dto::{
+        GenericMessageResponse, UpdateDetectorConfigRequest, UpdateManualDetectionConfigRequest,
+        UpdatePollingConfigRequest,
+    },
     state::AppState,
 };
 use app_core::domain::{config::BotConfig, object::ObjectClass};
@@ -200,5 +203,39 @@ pub async fn update_polling_config(
     Ok(Json(GenericMessageResponse {
         success: true,
         message: "Polling configuration updated successfully".to_string(),
+    }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/config/manual-detection",
+    tag = "Config",
+    request_body = UpdateManualDetectionConfigRequest,
+    responses(
+        (status = 200, description = "Manual detection config updated", body = GenericMessageResponse),
+        (status = 400, description = "Update failed", body = GenericMessageResponse)
+    )
+)]
+pub async fn update_manual_detection_config(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateManualDetectionConfigRequest>,
+) -> Result<Json<GenericMessageResponse>, (StatusCode, Json<GenericMessageResponse>)> {
+    state
+        .config_service
+        .set_manual_detection(req.enable, req.interval_seconds, req.types)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GenericMessageResponse {
+                    success: false,
+                    message: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(GenericMessageResponse {
+        success: true,
+        message: "Manual detection configuration updated successfully".to_string(),
     }))
 }

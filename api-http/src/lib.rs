@@ -4,11 +4,44 @@ use crate::{
     routes::{auth_routes::*, camera_routes::*, config_routes::*, media_routes::*},
     state::AppState,
 };
-use app_core::domain::{config::*, object::*};
-use axum::Router;
+use app_core::domain::{camera::*, config::*, object::*};
+use axum::{Router, response::IntoResponse};
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+#[derive(rust_embed::Embed)]
+#[folder = "web/"]
+pub struct WebAssets;
+
+pub async fn static_handler(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    let mut path = uri.path().trim_start_matches('/').to_string();
+    if path.is_empty() {
+        path = "index.html".to_string();
+    }
+
+    if let Some(content) = WebAssets::get(&path) {
+        let mime = mime_guess::from_path(&path).first_or_octet_stream();
+        return (
+            [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+            axum::body::Body::from(content.data),
+        )
+            .into_response();
+    }
+
+    // SPA fallback: return index.html for frontend navigation routes
+    if !path.contains('.') && !path.starts_with("api/") && !path.starts_with("swagger-ui") {
+        if let Some(content) = WebAssets::get("index.html") {
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                axum::body::Body::from(content.data),
+            )
+                .into_response();
+        }
+    }
+
+    (axum::http::StatusCode::NOT_FOUND, "Not Found").into_response()
+}
 
 struct SecurityAddon;
 
@@ -45,10 +78,14 @@ impl utoipa::Modify for SecurityAddon {
         crate::routes::camera_routes::fix_snapshot_uri,
         crate::routes::media_routes::get_snapshot,
         crate::routes::media_routes::detect_objects,
+        crate::routes::media_routes::get_recording_summary,
+        crate::routes::media_routes::get_recording_list,
+        crate::routes::media_routes::download_recording,
         crate::routes::config_routes::get_config,
         crate::routes::config_routes::reset_config,
         crate::routes::config_routes::get_available_detector_types,
         crate::routes::config_routes::update_detector_config,
+        crate::routes::config_routes::update_manual_detection_config,
         crate::routes::config_routes::update_polling_config,
     ),
     components(
@@ -66,7 +103,10 @@ impl utoipa::Modify for SecurityAddon {
             SetMultiChannelDetectionRequest,
             DetectedObjectResponse,
             DetectionResponse,
+            Recording,
+            RecordingSummary,
             UpdateDetectorConfigRequest,
+            UpdateManualDetectionConfigRequest,
             UpdatePollingConfigRequest,
             GenericMessageResponse,
             BotConfig,
@@ -99,22 +139,13 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let public_routes = Router::new().route(
-        "/api/v1/auth/login",
-        axum::routing::post(login),
-    );
+    let public_routes = Router::new().route("/api/v1/auth/login", axum::routing::post(login));
 
     let protected_routes = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // Auth routes (protected)
-        .route(
-            "/api/v1/auth/logout",
-            axum::routing::post(logout),
-        )
-        .route(
-            "/api/v1/auth/me",
-            axum::routing::get(current_user),
-        )
+        .route("/api/v1/auth/logout", axum::routing::post(logout))
+        .route("/api/v1/auth/me", axum::routing::get(current_user))
         // Camera routes
         .route(
             "/api/v1/cameras",
@@ -153,6 +184,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/cameras/{id}/detect",
             axum::routing::post(detect_objects),
         )
+        .route(
+            "/api/v1/cameras/{id}/recordings/summary",
+            axum::routing::get(get_recording_summary),
+        )
+        .route(
+            "/api/v1/cameras/{id}/recordings",
+            axum::routing::get(get_recording_list),
+        )
+        .route(
+            "/api/v1/cameras/{id}/recordings/download",
+            axum::routing::get(download_recording),
+        )
         // Config routes
         .route("/api/v1/config", axum::routing::get(get_config))
         .route("/api/v1/config/reset", axum::routing::post(reset_config))
@@ -163,6 +206,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/config/detector",
             axum::routing::patch(update_detector_config),
+        )
+        .route(
+            "/api/v1/config/manual-detection",
+            axum::routing::patch(update_manual_detection_config),
         )
         .route(
             "/api/v1/config/polling",
@@ -176,6 +223,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .fallback(static_handler)
         .layer(cors)
         .with_state(state)
 }

@@ -111,6 +111,24 @@ pub struct GenericMessageResponse {
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
+pub struct UpdateManualDetectionConfigRequest {
+    pub enable: bool,
+    pub interval_seconds: Option<u64>,
+    pub types: Option<Vec<ObjectClass>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RecordingSummaryQuery {
+    pub days: Option<i64>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RecordingListQuery {
+    pub date: Option<String>,
+    pub clip_seconds: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
 pub struct LoginRequest {
     #[schema(example = "admin")]
     pub username: String,

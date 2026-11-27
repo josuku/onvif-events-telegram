@@ -4,6 +4,7 @@ use crate::{
     traits::{api_camera_client::ApiCameraClient, onvif_camera_client::OnvifCameraClient},
 };
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,7 +189,8 @@ pub struct CameraStatus {
     pub event_subscription_failures: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Recording {
     pub name: String,
     pub size_mb: f64,
@@ -196,7 +198,8 @@ pub struct Recording {
     pub end: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct RecordingSummary {
     pub total_files: usize,
     pub total_size_mb: f64,

@@ -14,6 +14,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+rust-embed = "8"
+mime_guess = "2"
 
 app-core = { path = "../app-core", features = ["utoipa"] }
 app-services = { path = "../app-services" }

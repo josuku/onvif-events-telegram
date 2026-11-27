@@ -1,13 +1,15 @@
 use crate::{
-    dto::{AuthErrorResponse, CurrentUserResponse, GenericMessageResponse, LoginRequest, LoginResponse},
+    dto::{
+        AuthErrorResponse, CurrentUserResponse, GenericMessageResponse, LoginRequest, LoginResponse,
+    },
     state::AppState,
 };
 use app_services::{AuthClaims, LoginRequest as ServiceLoginRequest};
 use axum::{
-    extract::State,
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
     Extension, Json,
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 
 #[utoipa::path(
@@ -21,10 +23,7 @@ use axum::{
     tag = "Auth",
     security()
 )]
-pub async fn login(
-    State(state): State<AppState>,
-    Json(payload): Json<LoginRequest>,
-) -> Response {
+pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginRequest>) -> Response {
     let service_req = ServiceLoginRequest {
         username: payload.username,
         password: payload.password,
@@ -105,9 +104,7 @@ pub async fn logout() -> Response {
         ("bearer_auth" = [])
     )
 )]
-pub async fn current_user(
-    Extension(claims): Extension<AuthClaims>,
-) -> Response {
+pub async fn current_user(Extension(claims): Extension<AuthClaims>) -> Response {
     Json(CurrentUserResponse {
         username: claims.sub,
         expires_at: claims.exp,

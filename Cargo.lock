@@ -182,6 +182,8 @@ dependencies = [
  "axum",
  "chrono",
  "http-body-util",
+ "mime_guess",
+ "rust-embed",
  "serde",
  "serde_json",
  "tokio",

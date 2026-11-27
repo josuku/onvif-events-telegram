@@ -184,6 +184,7 @@ main()
 | 2026-11-16 | Descarga completa de archivo seleccionado en lista | Se pasa la duración real (`end - begin`) en el callback para que no se recorte al valor por defecto de 30s. |
 | 2026-11-21 | Fase 1 & 2: Capa de servicios (`app-services`) y REST API (`api-http`) | Extracción de lógica de negocio a servicios (`CameraService`, `ConfigService`, `MediaService`) y creación de API HTTP con Axum y OpenAPI/Swagger UI. |
 | 2026-11-21 | Fase 3: Autenticación JWT y Seguridad API | Mecanismo de autenticación JWT con credenciales en `config.yaml` (`http.auth`), endpoint público de login `/api/v1/auth/login` (emite token Bearer y cookie `Set-Cookie: token=...`), logout `/api/v1/auth/logout`, `/api/v1/auth/me`. Middleware de protección universal (soporta header `Authorization: Bearer`, cookie y query param `?token=...`) protegiendo todas las rutas de API y Swagger UI (`/swagger-ui`, `/api-docs`). |
+| 2026-11-23 | Fase 4: Frontend Web con Modern Web Guidance | Dashboard SPA servido directamente por Axum embebido con `rust-embed` sin dependencias externas ni build steps pesados. Implementado con estándares web modernos: native HTML5 `<dialog>`, CSS Grid, Container Queries (`@container`), CSS custom properties, diseño responsive adaptado a móvil/tablet con barra de navegación inferior nativa y controles táctiles de 44px, modo light/dark, ES Modules, Canvas 2D overlay para bounding boxes YOLO, endpoints de grabaciones (`/api/v1/cameras/{id}/recordings`, `/summary`, `/download`) y ajuste de sensibilidades YOLO/detección en tiempo real. |
 
 ---
 

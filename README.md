@@ -54,5 +54,5 @@ TODOs
 - [ ] add oxvif implementation for onvif camera client
 - [ ] add ort implementation for object detection
 - [ ] add getvideo command indicating camera and number or seconds or minutes
+- [ ] be able to check pictures with data, and search by date, camera or object from the frontend
 - [ ] save detections in postgres and pictures in a folder (in future must have a cleanup process)
-- [ ] make a frontend to be able to check pictures with data, and search by date, camera or object

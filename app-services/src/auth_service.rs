@@ -1,7 +1,7 @@
 use crate::dtos::{AuthClaims, LoginRequest, LoginResponse};
 use app_core::domain::config::AuthConfig;
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
